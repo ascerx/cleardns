@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClearDNS</string>
+    <string name="tile_label">ClearDNS</string>
+    <string name="notif_channel">Protection status</string>
+    <string name="notif_title">ClearDNS is protecting you</string>
+    <string name="notif_text">DNS-over-HTTPS with tracker blocking is active.</string>
+</resources>
