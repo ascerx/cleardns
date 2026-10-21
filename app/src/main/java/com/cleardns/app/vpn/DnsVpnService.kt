@@ -34,7 +34,7 @@ class DnsVpnService : VpnService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val executor: ExecutorService = Executors.newFixedThreadPool(4)
-    private val doh = DohClient()
+    private val doh = DohClient(protect = { socket -> protect(socket) })
     private val pending = AtomicLong(0)
 
     private var tun: ParcelFileDescriptor? = null
@@ -67,11 +67,13 @@ class DnsVpnService : VpnService() {
             .addRoute(DNS_IP, 32)
             .addDnsServer(DNS_IP)
             .setMtu(1500)
-            .establish() ?: run {
+            .establish()
+        if (fd == null) {
             Log.e(TAG, "establish() returned null")
             VpnState.isRunning.value = false
             return
         }
+        Log.i(TAG, "VPN established: tun addr $TUN_ADDRESS, dns $DNS_IP")
         tun = fd
         VpnState.isRunning.value = true
         scope.launch(Dispatchers.IO) { readLoop(fd) }
@@ -96,31 +98,50 @@ class DnsVpnService : VpnService() {
 
     private fun handlePacket(packet: ByteArray, output: FileOutputStream, fakeDnsIp: ByteArray) {
         val version = (packet[0].toInt() shr 4) and 0xF
-        if (version != 4) return
+        if (version != 4) {
+            logOnce("drop: not IPv4 (v$version)")
+            return
+        }
         val protocol = packet[9].toInt() and 0xFF
-        if (protocol != 17) return // UDP only
+        if (protocol != 17) {
+            logOnce("drop: proto $protocol (no UDP)")
+            return
+        }
         val ihl = (packet[0].toInt() and 0xF) * 4
         if (packet.size < ihl + 8) return
         val srcPort = ((packet[ihl].toInt() and 0xFF) shl 8) or (packet[ihl + 1].toInt() and 0xFF)
         val dstPort = ((packet[ihl + 2].toInt() and 0xFF) shl 8) or (packet[ihl + 3].toInt() and 0xFF)
-        if (dstPort != 53) return
+        if (dstPort != 53) {
+            logOnce("drop: udp port $dstPort != 53")
+            return
+        }
         val udpLen = ((packet[ihl + 4].toInt() and 0xFF) shl 8) or (packet[ihl + 5].toInt() and 0xFF)
         if (udpLen < 12) return
         val dnsLen = udpLen - 8
         val dnsQuery = packet.copyOfRange(ihl + 8, ihl + 8 + dnsLen)
         val srcIp = packet.copyOfRange(12, 16)
 
+        logOnce("DNS query received: ${DnsProtocol.extractDomain(dnsQuery)} ($dnsLen bytes)")
         pending.incrementAndGet()
         executor.execute {
             val response = resolveDns(dnsQuery)
-            val result = response ?: return@execute
+            if (response == null) {
+                Log.w(TAG, "DoH failed for ${DnsProtocol.extractDomain(dnsQuery)}")
+                return@execute
+            }
             try {
-                val out = DnsProtocol.buildUdpV4(result, fakeDnsIp, srcIp, srcPort)
+                val out = DnsProtocol.buildUdpV4(response, fakeDnsIp, srcIp, srcPort)
                 synchronized(output) { output.write(out) }
             } catch (_: Exception) {
                 // TUN may have closed while we were resolving; ignore.
             }
         }
+    }
+
+    private val logCounter = AtomicLong(0)
+
+    private fun logOnce(message: String) {
+        if (logCounter.incrementAndGet() <= 25) Log.d(TAG, "#${logCounter.get()}: $message")
     }
 
     private fun resolveDns(query: ByteArray): ByteArray? {
