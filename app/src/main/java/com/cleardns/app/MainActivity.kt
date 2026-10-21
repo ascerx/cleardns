@@ -2,6 +2,7 @@ package com.cleardns.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -177,9 +178,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onToggleProtection() {
+        syncServiceState()
         if (VpnState.isRunning.value) {
             VpnState.userStopRequested = true
             stopService(Intent(this, DnsVpnService::class.java))
+            VpnState.isRunning.value = false
             saveCounters()
             return
         }
@@ -237,6 +240,24 @@ class MainActivity : ComponentActivity() {
     private fun saveCounters() {
         AppPrefs.putLong(this, AppPrefs.KEY_QUERIES_TOTAL, VpnState.queriesTotal.value)
         AppPrefs.putLong(this, AppPrefs.KEY_QUERIES_BLOCKED, VpnState.queriesBlocked.value)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        syncServiceState()
+    }
+
+    /** UI must reflect the real service state, not in-process memory:
+     *  the OS may have killed the service in the background. */
+    private fun syncServiceState() {
+        val running = try {
+            getSystemService(ActivityManager::class.java)
+                .getRunningServices(Int.MAX_VALUE)
+                .any { it.service.className == DnsVpnService::class.java.name }
+        } catch (_: Exception) {
+            VpnState.isRunning.value
+        }
+        VpnState.isRunning.value = running
     }
 
     override fun onPause() {
