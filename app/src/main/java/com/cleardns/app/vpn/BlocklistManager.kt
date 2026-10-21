@@ -41,11 +41,13 @@ object BlocklistManager {
         }
     }
 
-    /** Checks a domain and its first two parent domains against the blocklist. */
+    /** Checks a domain and its first two parent domains against the blocklist
+     *  (downloaded list + user's custom domains). */
     fun isBlocked(domain: String): Boolean {
         var candidate: String = domain.lowercase()
         repeat(3) {
             if (candidate.isEmpty()) return false
+            if (candidate in VpnState.customBlocklist.value) return true
             if (synchronized(lock) { candidate in domains }) return true
             val dot = candidate.indexOf('.')
             if (dot == -1) return false

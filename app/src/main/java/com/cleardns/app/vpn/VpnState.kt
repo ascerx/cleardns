@@ -11,6 +11,10 @@ object VpnState {
     val queriesTotal = MutableStateFlow(0L)
     val queriesBlocked = MutableStateFlow(0L)
     val adFreeUntil = MutableStateFlow(0L)
+    /** Domains the user added manually; unioned with the downloaded blocklist. */
+    val customBlocklist = MutableStateFlow(emptySet<String>())
+    /** UIDs excluded from the VPN entirely (Rethink-style "skip apps"). */
+    val skippedUids = MutableStateFlow(emptySet<Int>())
 
     fun resetCounters() {
         queriesTotal.value = 0L

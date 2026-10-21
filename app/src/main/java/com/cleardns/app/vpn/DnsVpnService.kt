@@ -4,10 +4,15 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.core.app.ServiceCompat
+import com.cleardns.app.AppPrefs
 import com.cleardns.app.MainActivity
 import com.cleardns.app.R
 import kotlinx.coroutines.CoroutineScope
@@ -23,12 +28,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Local VPN that intercepts DNS queries and resolves them over HTTPS (DoH),
- * blocking queries for blocked domains.
- *
- * Architecture (same trick used by well-known non-root DNS apps):
- *  - The TUN interface only receives traffic for the fake DNS IP (10.111.222.3).
- *  - Android hands apps the fake IP as their DNS server while the VPN is active.
- *  - DNS queries arrive as UDP/53 packets on the TUN; everything else is unaffected.
+ * blocking queries for blocked domains. Selected apps can be excluded from
+ * the VPN entirely (they keep using the system resolver).
  */
 class DnsVpnService : VpnService() {
 
@@ -40,19 +41,51 @@ class DnsVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private val blockedCount = AtomicLong(0)
     private val totalCount = AtomicLong(0)
+    private val logCounter = AtomicLong(0)
+
+    private val notificationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                ACTION_PAUSE -> {
+                    VpnState.blockingEnabled.value = !VpnState.blockingEnabled.value
+                    AppPrefs.putBoolean(context, AppPrefs.KEY_BLOCKING, VpnState.blockingEnabled.value)
+                    refreshNotification()
+                }
+                ACTION_STOP -> {
+                    saveCounters()
+                    ServiceCompat.stopForeground(this@DnsVpnService, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         BlocklistManager.load(this)
+        val filter = IntentFilter().apply {
+            addAction(ACTION_PAUSE)
+            addAction(ACTION_STOP)
+        }
+        registerReceiver(notificationReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startAsForeground()
-        startVpn()
+        when (intent?.action) {
+            ACTION_RESTART -> {
+                Log.i(TAG, "Restarting VPN (app skip list changed)")
+                stopVpnInternal()
+                startVpn()
+            }
+            else -> startVpn()
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        unregisterReceiver(notificationReceiver)
+        saveCounters()
         stopVpnInternal()
         scope.cancel()
         executor.shutdown()
@@ -61,13 +94,31 @@ class DnsVpnService : VpnService() {
 
     private fun startVpn() {
         if (tun != null) return
-        val fd = Builder()
+        val builder = Builder()
             .setSession("ClearDNS")
             .addAddress(TUN_ADDRESS, 32)
             .addRoute(DNS_IP, 32)
             .addDnsServer(DNS_IP)
             .setMtu(1500)
-            .establish()
+
+        // Apps excluded from the VPN (Rethink-style "skip apps"): they bypass
+        // ClearDNS completely and keep using the system's DNS.
+        val skipped = VpnState.skippedUids.value
+        val pm = packageManager
+        var excluded = 0
+        for (uid in skipped) {
+            for (pkg in pm.getPackagesForUid(uid) ?: emptyArray()) {
+                try {
+                    builder.addDisallowedApplication(pkg)
+                    excluded++
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not skip pkg $pkg: ${e.message}")
+                }
+            }
+        }
+        if (excluded > 0) Log.i(TAG, "Excluded $excluded packages from the VPN")
+
+        val fd = builder.establish()
         if (fd == null) {
             Log.e(TAG, "establish() returned null")
             VpnState.isRunning.value = false
@@ -85,14 +136,14 @@ class DnsVpnService : VpnService() {
         val buffer = ByteArray(65535)
         val fakeDnsIp = dnsIpBytes()
         try {
-            while (VpnState.isRunning.value) {
+            while (tun === fd && VpnState.isRunning.value) {
                 val length = input.read(buffer)
                 if (length < 20) continue
                 val packet = buffer.copyOf(length)
                 handlePacket(packet, output, fakeDnsIp)
             }
         } catch (e: Exception) {
-            if (VpnState.isRunning.value) Log.w(TAG, "read loop ended: ${e.message}")
+            if (tun === fd && VpnState.isRunning.value) Log.w(TAG, "read loop ended: ${e.message}")
         }
     }
 
@@ -138,12 +189,6 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private val logCounter = AtomicLong(0)
-
-    private fun logOnce(message: String) {
-        if (logCounter.incrementAndGet() <= 25) Log.d(TAG, "#${logCounter.get()}: $message")
-    }
-
     private fun resolveDns(query: ByteArray): ByteArray? {
         val domain = DnsProtocol.extractDomain(query)
         val blocked = domain != null && VpnState.blockingEnabled.value && BlocklistManager.isBlocked(domain)
@@ -152,6 +197,7 @@ class DnsVpnService : VpnService() {
             val count = blockedCount.incrementAndGet()
             VpnState.queriesTotal.value = totalCount.get()
             VpnState.queriesBlocked.value = count
+            Log.d(TAG, "BLOCKED: $domain")
             return DnsProtocol.buildNxDomain(query)
         }
         val response = doh.resolve(query) ?: return null
@@ -171,25 +217,56 @@ class DnsVpnService : VpnService() {
         tun = null
     }
 
+    private fun saveCounters() {
+        AppPrefs.putLong(applicationContext, AppPrefs.KEY_QUERIES_TOTAL, totalCount.get())
+        AppPrefs.putLong(applicationContext, AppPrefs.KEY_QUERIES_BLOCKED, blockedCount.get())
+    }
+
     private fun startAsForeground() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW),
         )
+        refreshNotification()
+    }
+
+    private fun refreshNotification() {
+        val nm = getSystemService(NotificationManager::class.java)
+        val blocking = VpnState.blockingEnabled.value
         val contentIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE,
         )
+        val pauseIntent = PendingIntent.getBroadcast(
+            this, 1,
+            Intent(ACTION_PAUSE).setPackage(packageName),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val stopIntent = PendingIntent.getBroadcast(
+            this, 2,
+            Intent(ACTION_STOP).setPackage(packageName),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val pauseTitle = if (blocking) "Pause blocking" else "Resume blocking"
         val notification: Notification =
             Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_shield)
-                .setContentTitle(getString(R.string.notif_title))
+                .setContentTitle(
+                    if (blocking) getString(R.string.notif_title)
+                    else getString(R.string.notif_title_paused),
+                )
                 .setContentText(getString(R.string.notif_text))
                 .setContentIntent(contentIntent)
                 .setOngoing(true)
+                .addAction(0, pauseTitle, pauseIntent)
+                .addAction(0, "Stop", stopIntent)
                 .build()
-        startForeground(NOTIF_ID, notification)
+        nm.notify(NOTIF_ID, notification)
+    }
+
+    private fun logOnce(message: String) {
+        if (logCounter.incrementAndGet() <= 25) Log.d(TAG, "#${logCounter.get()}: $message")
     }
 
     private fun dnsIpBytes(): ByteArray = DNS_IP.split('.').map { it.toInt().toByte() }.toByteArray()
@@ -200,5 +277,8 @@ class DnsVpnService : VpnService() {
         private const val NOTIF_ID = 1
         const val TUN_ADDRESS = "10.111.222.1"
         const val DNS_IP = "10.111.222.3"
+        const val ACTION_PAUSE = "com.cleardns.app.PAUSE"
+        const val ACTION_STOP = "com.cleardns.app.STOP"
+        const val ACTION_RESTART = "com.cleardns.app.RESTART"
     }
 }

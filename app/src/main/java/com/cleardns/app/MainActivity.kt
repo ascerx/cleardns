@@ -3,29 +3,41 @@ package com.cleardns.app
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Drawable
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GppBad
 import androidx.compose.material.icons.filled.GppGood
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.lifecycleScope
 import com.cleardns.app.vpn.BlocklistManager
 import com.cleardns.app.vpn.DnsVpnService
 import com.cleardns.app.vpn.VpnState
@@ -34,24 +46,29 @@ import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.rewarded.RewardedAd
 import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
+import com.google.android.gms.ads.FullScreenContentCallback
+
+private enum class Screen { Home, Apps, Domains }
 
 class MainActivity : ComponentActivity() {
 
     private var rewardedAd: RewardedAd? = null
 
-    private val prefs by lazy { getSharedPreferences("cleardns", MODE_PRIVATE) }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // Restore persisted state.
-        VpnState.blockingEnabled.value = prefs.getBoolean(KEY_BLOCKING, true)
-        VpnState.adFreeUntil.value = prefs.getLong(KEY_AD_FREE_UNTIL, 0L)
-        VpnState.queriesTotal.value = prefs.getLong(KEY_QUERIES_TOTAL, 0L)
-        VpnState.queriesBlocked.value = prefs.getLong(KEY_QUERIES_BLOCKED, 0L)
+        VpnState.blockingEnabled.value = AppPrefs.getBoolean(this, AppPrefs.KEY_BLOCKING, true)
+        VpnState.adFreeUntil.value = AppPrefs.getLong(this, AppPrefs.KEY_AD_FREE_UNTIL, 0L)
+        VpnState.queriesTotal.value = AppPrefs.getLong(this, AppPrefs.KEY_QUERIES_TOTAL, 0L)
+        VpnState.queriesBlocked.value = AppPrefs.getLong(this, AppPrefs.KEY_QUERIES_BLOCKED, 0L)
+        VpnState.skippedUids.value = AppPrefs.skippedUids(this)
+        VpnState.customBlocklist.value = AppPrefs.customDomains(this)
         BlocklistManager.load(this)
 
         loadRewardedAd()
@@ -59,7 +76,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    HomeScreen(
+                    AppRoot(
                         onToggle = { onToggleProtection() },
                         onWatchAd = { showRewardedAd() },
                     )
@@ -74,9 +91,8 @@ class MainActivity : ComponentActivity() {
             saveCounters()
             return
         }
-        // Notifications permission (33+) for the foreground-service notification.
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED
+            != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
@@ -114,46 +130,63 @@ class MainActivity : ComponentActivity() {
             loadRewardedAd()
             return
         }
-        ad.fullScreenContentCallback = object : com.google.android.gms.ads.FullScreenContentCallback() {
+        ad.fullScreenContentCallback = object : FullScreenContentCallback() {
             override fun onAdDismissedFullScreenContent() {
                 rewardedAd = null
                 loadRewardedAd()
             }
         }
         ad.show(this) {
-            // Reward earned: no ads for 24 hours.
             VpnState.adFreeUntil.value = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(24)
-            prefs.edit().putLong(KEY_AD_FREE_UNTIL, VpnState.adFreeUntil.value).apply()
+            AppPrefs.putLong(this@MainActivity, AppPrefs.KEY_AD_FREE_UNTIL, VpnState.adFreeUntil.value)
         }
     }
 
     private fun saveCounters() {
-        prefs.edit()
-            .putLong(KEY_QUERIES_TOTAL, VpnState.queriesTotal.value)
-            .putLong(KEY_QUERIES_BLOCKED, VpnState.queriesBlocked.value)
-            .apply()
+        AppPrefs.putLong(this, AppPrefs.KEY_QUERIES_TOTAL, VpnState.queriesTotal.value)
+        AppPrefs.putLong(this, AppPrefs.KEY_QUERIES_BLOCKED, VpnState.queriesBlocked.value)
+    }
+
+    override fun onPause() {
+        saveCounters()
+        super.onPause()
     }
 
     companion object {
         private const val REQUEST_VPN = 100
-        private const val KEY_BLOCKING = "blocking"
-        private const val KEY_AD_FREE_UNTIL = "ad_free_until"
-        private const val KEY_QUERIES_TOTAL = "queries_total"
-        private const val KEY_QUERIES_BLOCKED = "queries_blocked"
     }
 }
 
 @Composable
-private fun HomeScreen(onToggle: () -> Unit, onWatchAd: () -> Unit) {
-    val context = LocalContext.current
+private fun AppRoot(onToggle: () -> Unit, onWatchAd: () -> Unit) {
+    var screen by remember { mutableStateOf(Screen.Home) }
+    when (screen) {
+        Screen.Home -> HomeScreen(
+            onToggle = onToggle,
+            onWatchAd = onWatchAd,
+            onOpenApps = { screen = Screen.Apps },
+            onOpenDomains = { screen = Screen.Domains },
+        )
+        Screen.Apps -> AppsScreen(onBack = { screen = Screen.Home })
+        Screen.Domains -> DomainsScreen(onBack = { screen = Screen.Home })
+    }
+}
+
+@Composable
+private fun HomeScreen(
+    onToggle: () -> Unit,
+    onWatchAd: () -> Unit,
+    onOpenApps: () -> Unit,
+    onOpenDomains: () -> Unit,
+) {
     val isRunning by VpnState.isRunning.collectAsState()
     val blocking by VpnState.blockingEnabled.collectAsState()
     val total by VpnState.queriesTotal.collectAsState()
     val blocked by VpnState.queriesBlocked.collectAsState()
     val adFreeUntil by VpnState.adFreeUntil.collectAsState()
     val refreshing by BlocklistManager.isRefreshing.collectAsState()
-
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -162,7 +195,7 @@ private fun HomeScreen(onToggle: () -> Unit, onWatchAd: () -> Unit) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
 
         Icon(
             imageVector = if (isRunning) Icons.Filled.GppGood else Icons.Filled.GppBad,
@@ -176,11 +209,11 @@ private fun HomeScreen(onToggle: () -> Unit, onWatchAd: () -> Unit) {
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
         )
-        if (isRunning) {
+        if (isRunning && !blocking) {
             Text(
-                text = "Encrypted DNS + tracker blocking",
+                text = "Blocking paused",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.outline,
+                color = MaterialTheme.colorScheme.tertiary,
             )
         }
         Spacer(Modifier.height(20.dp))
@@ -194,10 +227,7 @@ private fun HomeScreen(onToggle: () -> Unit, onWatchAd: () -> Unit) {
 
         Spacer(Modifier.height(24.dp))
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-        ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             StatCard("Queries", total.toString(), Modifier.weight(1f))
             Spacer(Modifier.width(12.dp))
             StatCard("Blocked", blocked.toString(), Modifier.weight(1f))
@@ -213,20 +243,19 @@ private fun HomeScreen(onToggle: () -> Unit, onWatchAd: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Block trackers")
-                    Switch(checked = blocking, onCheckedChange = { VpnState.blockingEnabled.value = it })
+                    Switch(checked = blocking, onCheckedChange = {
+                        VpnState.blockingEnabled.value = it
+                        AppPrefs.putBoolean(context, AppPrefs.KEY_BLOCKING, it)
+                    })
                 }
                 Text(
-                    text = "${BlocklistManager.size().coerceAtLeast(1)} domains in blocklist",
+                    text = "${BlocklistManager.size().coerceAtLeast(1)} + ${VpnState.customBlocklist.value.size} domain rules",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            BlocklistManager.refresh(context)
-                        }
-                    },
+                    onClick = { scope.launch { BlocklistManager.refresh(context) } },
                     enabled = !refreshing,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -234,6 +263,20 @@ private fun HomeScreen(onToggle: () -> Unit, onWatchAd: () -> Unit) {
                 }
             }
         }
+
+        Spacer(Modifier.height(12.dp))
+
+        SimpleMenuCard(
+            title = "Apps excluded from protection",
+            subtitle = "${VpnState.skippedUids.value.size} apps bypass the VPN",
+            onClick = onOpenApps,
+        )
+        Spacer(Modifier.height(10.dp))
+        SimpleMenuCard(
+            title = "Custom blocked domains",
+            subtitle = "${VpnState.customBlocklist.value.size} custom rules",
+            onClick = onOpenDomains,
+        )
 
         Spacer(Modifier.height(16.dp))
 
@@ -251,6 +294,16 @@ private fun HomeScreen(onToggle: () -> Unit, onWatchAd: () -> Unit) {
                 color = MaterialTheme.colorScheme.outline,
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+}
+
+@Composable
+private fun SimpleMenuCard(title: String, subtitle: String, onClick: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         }
     }
 }
@@ -280,4 +333,254 @@ private fun BannerAd() {
             }
         },
     )
+}
+
+// ---------- Apps screen ----------
+
+private data class AppEntry(
+    val uid: Int,
+    val packageName: String,
+    val label: String,
+    val icon: Bitmap,
+    var skipped: Boolean,
+)
+
+@Composable
+private fun AppsScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val skipped by VpnState.skippedUids.collectAsState()
+    var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
+    var query by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(skipped) {
+        loading = true
+        apps = withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            val packages = runCatching {
+                pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
+            }.getOrDefault(emptyList())
+            packages
+                .filter { pkg ->
+                    pkg.requestedPermissions?.any { it == android.Manifest.permission.INTERNET } == true
+                }
+                .filter { it.packageName != context.packageName }
+                .mapNotNull { pkg ->
+                    val appInfo = pkg.applicationInfo ?: return@mapNotNull null
+                    AppEntry(
+                        uid = appInfo.uid,
+                        packageName = pkg.packageName,
+                        label = try { pm.getApplicationLabel(appInfo).toString() } catch (_: Exception) { pkg.packageName },
+                        icon = drawableToBitmap(pm.getApplicationIcon(appInfo)),
+                        skipped = appInfo.uid in skipped,
+                    )
+                }
+                .sortedWith(compareBy({ !it.skipped }, { it.label.lowercase() }))
+        }
+        loading = false
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp, 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Column {
+                Text("Apps", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text(
+                    "Excluded apps use the regular system DNS (no filtering)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = { Text("Search") },
+            leadingIcon = { Icon(Icons.Filled.Search, null) },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+        )
+        if (loading) {
+            Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.Center) {
+                CircularProgressIndicator()
+            }
+        } else {
+            val filtered = apps.filter { it.label.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true) }
+            LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
+                items(filtered, key = { it.packageName }) { app ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Image(
+                            bitmap = app.icon.asImageBitmap(),
+                            contentDescription = app.label,
+                            modifier = Modifier.size(40.dp),
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(app.label, fontSize = 15.sp)
+                            Text(app.packageName, fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+                        }
+                        Text(
+                            if (app.skipped) "excluded" else "filtered",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (app.skipped) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                        )
+                        Switch(
+                            checked = app.skipped,
+                            onCheckedChange = { exclude ->
+                                val current = VpnState.skippedUids.value.toMutableSet()
+                                if (exclude) {
+                                    current.add(app.uid)
+                                    app.skipped = true
+                                } else {
+                                    current.remove(app.uid)
+                                    app.skipped = false
+                                }
+                                VpnState.skippedUids.value = current
+                                AppPrefs.setSkippedUids(context, current)
+                                // Restart VPN so the new skip list takes effect.
+                                if (VpnState.isRunning.value) {
+                                    context.startService(
+                                        Intent(context, DnsVpnService::class.java)
+                                            .setAction(DnsVpnService.ACTION_RESTART),
+                                    )
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun drawableToBitmap(drawable: Drawable): Bitmap {
+    val bitmap = Bitmap.createBitmap(48, 48, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    drawable.setBounds(0, 0, 48, 48)
+    drawable.draw(canvas)
+    return bitmap
+}
+
+// ---------- Domains screen ----------
+
+@Composable
+private fun DomainsScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val domains by VpnState.customBlocklist.collectAsState()
+    var input by remember { mutableStateOf("") }
+    var toDelete by remember { mutableStateOf<String?>(null) }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp, 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Column {
+                Text("Custom blocked domains", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text(
+                    "Add domains you want to block",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = input,
+                onValueChange = { input = it },
+                placeholder = { Text("example.com") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            IconButton(
+                onClick = {
+                    val domain = input.trim().lowercase().trimEnd('.')
+                    if (domain.contains('.') && domain.none { it.isWhitespace() }) {
+                        val current = VpnState.customBlocklist.value + domain
+                        VpnState.customBlocklist.value = current
+                        AppPrefs.setCustomDomains(context, current)
+                        input = ""
+                    }
+                },
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "Add")
+            }
+        }
+        Text(
+            "Blocked domains (and their subdomains) get NXDOMAIN while filtering is on.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(12.dp, 8.dp),
+        )
+        LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
+            items(domains.sorted(), key = { it }) { domain ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(domain, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { toDelete = domain }) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "Delete",
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            }
+        }
+        if (domains.isEmpty()) {
+            Text(
+                "No custom domains yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                textAlign = TextAlign.Center,
+            )
+        }
+        if (toDelete != null) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { toDelete = null },
+                title = { Text("Remove domain") },
+                text = { Text("Stop blocking \"${toDelete}\"?") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val current = VpnState.customBlocklist.value - toDelete!!
+                        VpnState.customBlocklist.value = current
+                        AppPrefs.setCustomDomains(context, current)
+                        toDelete = null
+                    }) { Text("Remove") }
+                },
+                dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
+            )
+        }
+    }
 }

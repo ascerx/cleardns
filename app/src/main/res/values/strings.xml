@@ -4,5 +4,6 @@
     <string name="tile_label">ClearDNS</string>
     <string name="notif_channel">Protection status</string>
     <string name="notif_title">ClearDNS is protecting you</string>
+    <string name="notif_title_paused">ClearDNS — blocking paused</string>
     <string name="notif_text">DNS-over-HTTPS with tracker blocking is active.</string>
 </resources>
