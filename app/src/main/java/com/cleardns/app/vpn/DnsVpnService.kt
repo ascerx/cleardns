@@ -35,8 +35,10 @@ class DnsVpnService : VpnService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val executor: ExecutorService = Executors.newFixedThreadPool(4)
-    private val doh = DohClient(protect = { socket -> protect(socket) })
     private val pending = AtomicLong(0)
+
+    @Volatile
+    private var doh: DohClient = DohClient()
 
     private var tun: ParcelFileDescriptor? = null
     private val blockedCount = AtomicLong(0)
@@ -125,7 +127,12 @@ class DnsVpnService : VpnService() {
             return
         }
         Log.i(TAG, "VPN established: tun addr $TUN_ADDRESS, dns $DNS_IP")
+        doh = DohClient(
+            endpoint = VpnState.dohEndpoint.value.ifEmpty { DohClient.DEFAULT_ENDPOINT },
+            protect = { socket -> protect(socket) },
+        )
         tun = fd
+        AppPrefs.putBoolean(applicationContext, AppPrefs.KEY_VPN_WAS_RUNNING, true)
         VpnState.isRunning.value = true
         scope.launch(Dispatchers.IO) { readLoop(fd) }
     }
@@ -207,6 +214,7 @@ class DnsVpnService : VpnService() {
     }
 
     private fun stopVpnInternal() {
+        AppPrefs.putBoolean(applicationContext, AppPrefs.KEY_VPN_WAS_RUNNING, false)
         VpnState.isRunning.value = false
         tun?.let {
             try {

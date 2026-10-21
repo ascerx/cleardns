@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.cleardns.app.vpn.BlocklistManager
 import com.cleardns.app.vpn.DnsVpnService
+import com.cleardns.app.vpn.DohClient
 import com.cleardns.app.vpn.VpnState
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
@@ -53,7 +54,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 import com.google.android.gms.ads.FullScreenContentCallback
 
-private enum class Screen { Home, Apps, Domains }
+private enum class Screen { Home, Apps, Domains, Lists }
 
 class MainActivity : ComponentActivity() {
 
@@ -69,6 +70,9 @@ class MainActivity : ComponentActivity() {
         VpnState.queriesBlocked.value = AppPrefs.getLong(this, AppPrefs.KEY_QUERIES_BLOCKED, 0L)
         VpnState.skippedUids.value = AppPrefs.skippedUids(this)
         VpnState.customBlocklist.value = AppPrefs.customDomains(this)
+        VpnState.whitelist.value = AppPrefs.whitelist(this)
+        VpnState.selectedLists.value = AppPrefs.listIds(this)
+        VpnState.dohEndpoint.value = AppPrefs.endpoint(this, DohClient.DEFAULT_ENDPOINT)
         BlocklistManager.load(this)
 
         loadRewardedAd()
@@ -166,9 +170,11 @@ private fun AppRoot(onToggle: () -> Unit, onWatchAd: () -> Unit) {
             onWatchAd = onWatchAd,
             onOpenApps = { screen = Screen.Apps },
             onOpenDomains = { screen = Screen.Domains },
+            onOpenLists = { screen = Screen.Lists },
         )
         Screen.Apps -> AppsScreen(onBack = { screen = Screen.Home })
         Screen.Domains -> DomainsScreen(onBack = { screen = Screen.Home })
+        Screen.Lists -> ListsScreen(onBack = { screen = Screen.Home })
     }
 }
 
@@ -178,6 +184,7 @@ private fun HomeScreen(
     onWatchAd: () -> Unit,
     onOpenApps: () -> Unit,
     onOpenDomains: () -> Unit,
+    onOpenLists: () -> Unit,
 ) {
     val isRunning by VpnState.isRunning.collectAsState()
     val blocking by VpnState.blockingEnabled.collectAsState()
@@ -255,7 +262,7 @@ private fun HomeScreen(
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = { scope.launch { BlocklistManager.refresh(context) } },
+                    onClick = { scope.launch { BlocklistManager.downloadAndMerge(context, VpnState.selectedLists.value) } },
                     enabled = !refreshing,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -276,6 +283,12 @@ private fun HomeScreen(
             title = "Custom blocked domains",
             subtitle = "${VpnState.customBlocklist.value.size} custom rules",
             onClick = onOpenDomains,
+        )
+        Spacer(Modifier.height(10.dp))
+        SimpleMenuCard(
+            title = "Lists & DNS server",
+            subtitle = "${VpnState.selectedLists.value.size} blocklists · ${dnsLabel(VpnState.dohEndpoint.value)}",
+            onClick = onOpenLists,
         )
 
         Spacer(Modifier.height(16.dp))
@@ -476,6 +489,138 @@ private fun drawableToBitmap(drawable: Drawable): Bitmap {
     return bitmap
 }
 
+// ---------- Lists & DNS screen ----------
+
+private val DNS_OPTIONS = listOf(
+    "Google" to DohClient.DEFAULT_ENDPOINT,
+    "Cloudflare" to DohClient.CLOUDFLARE_ENDPOINT,
+    "Quad9" to "https://quad9.net/dns-query",
+    "AdGuard" to "https://dns.adguard-dns.com/dns-query",
+)
+
+private fun dnsLabel(endpoint: String): String =
+    DNS_OPTIONS.firstOrNull { it.second == endpoint }?.first ?: endpoint.removePrefix("https://").substringBefore('/')
+
+@Composable
+private fun ListsScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val selected by VpnState.selectedLists.collectAsState()
+    val endpoint by VpnState.dohEndpoint.collectAsState()
+    val refreshing by BlocklistManager.isRefreshing.collectAsState()
+    val progress by BlocklistManager.progress.collectAsState()
+    val error by BlocklistManager.lastError.collectAsState()
+    val listCount by remember { derivedStateOf { BlocklistManager.size() } }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp, 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Column {
+                Text("Lists & DNS server", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text(
+                    "Choose what to block and who resolves",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Blocklists", fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                BlocklistManager.AVAILABLE.forEach { list ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = list.id in selected,
+                            onCheckedChange = { checked ->
+                                val next = if (checked) selected + list.id else selected - list.id
+                                VpnState.selectedLists.value = next
+                                AppPrefs.setListIds(context, next)
+                            },
+                        )
+                        Column {
+                            Text(list.label, fontSize = 14.sp)
+                            Text(
+                                list.url.removePrefix("https://"),
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { scope.launch { BlocklistManager.downloadAndMerge(context, selected) } },
+                    enabled = !refreshing && selected.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (refreshing) (progress.ifEmpty { "Working…" }) else "Download & merge (${dnsDomainCountLabel(listCount)})")
+                }
+                error?.let {
+                    Text(
+                        "Last error: $it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("DNS-over-HTTPS server", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Applied on the next VPN start",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+                Spacer(Modifier.height(8.dp))
+                DNS_OPTIONS.forEach { (label, url) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = endpoint == url,
+                            onClick = {
+                                VpnState.dohEndpoint.value = url
+                                AppPrefs.setEndpoint(context, url)
+                            },
+                        )
+                        Text(label)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun dnsDomainCountLabel(count: Int): String {
+    return when {
+        count >= 1_000_000 -> "${"%.1f".format(count / 1_000_000f)}M domains"
+        count >= 1_000 -> "${count / 1_000}K domains"
+        else -> "$count domains"
+    }
+}
+
 // ---------- Domains screen ----------
 
 @Composable
@@ -485,7 +630,11 @@ private fun DomainsScreen(onBack: () -> Unit) {
     var input by remember { mutableStateOf("") }
     var toDelete by remember { mutableStateOf<String?>(null) }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -538,28 +687,97 @@ private fun DomainsScreen(onBack: () -> Unit) {
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.padding(12.dp, 8.dp),
         )
-        LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
-            items(domains.sorted(), key = { it }) { domain ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(domain, modifier = Modifier.weight(1f))
-                    IconButton(onClick = { toDelete = domain }) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            contentDescription = "Delete",
-                            tint = MaterialTheme.colorScheme.error,
-                        )
-                    }
+        domains.sorted().forEach { domain ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(domain, modifier = Modifier.weight(1f))
+                IconButton(onClick = { toDelete = domain }) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Delete",
+                        tint = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         }
         if (domains.isEmpty()) {
             Text(
                 "No custom domains yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                textAlign = TextAlign.Center,
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Spacer(Modifier.height(12.dp))
+
+        Text(
+            "Allowed domains (whitelist)",
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        Text(
+            "Never blocked, even if a blocklist matches.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        )
+        var allowInput by remember { mutableStateOf("") }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = allowInput,
+                onValueChange = { allowInput = it },
+                placeholder = { Text("example.com") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            IconButton(
+                onClick = {
+                    val domain = allowInput.trim().lowercase().trimEnd('.')
+                    if (domain.contains('.') && domain.none { it.isWhitespace() }) {
+                        val current = VpnState.whitelist.value + domain
+                        VpnState.whitelist.value = current
+                        AppPrefs.setWhitelist(context, current)
+                        allowInput = ""
+                    }
+                },
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "Add")
+            }
+        }
+        VpnState.whitelist.value.sorted().forEach { domain ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(domain, modifier = Modifier.weight(1f))
+                IconButton(onClick = {
+                    val current = VpnState.whitelist.value - domain
+                    VpnState.whitelist.value = current
+                    AppPrefs.setWhitelist(context, current)
+                }) {
+                    Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        if (VpnState.whitelist.value.isEmpty()) {
+            Text(
+                "No allowed domains yet.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.fillMaxWidth().padding(24.dp),

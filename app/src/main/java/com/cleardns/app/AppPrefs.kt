@@ -14,6 +14,9 @@ object AppPrefs {
 
     private const val KEY_SKIPPED_UIDS = "skipped_uids"
     private const val KEY_CUSTOM_DOMAINS = "custom_domains"
+    private const val KEY_WHITELIST = "whitelist"
+    private const val KEY_LIST_IDS = "list_ids"
+    private const val KEY_ENDPOINT = "doh_endpoint"
 
     fun skippedUids(context: Context): Set<Int> =
         prefs(context).getStringSet(KEY_SKIPPED_UIDS, emptySet())
@@ -31,6 +34,29 @@ object AppPrefs {
 
     fun setCustomDomains(context: Context, domains: Set<String>) {
         prefs(context).edit().putStringSet(KEY_CUSTOM_DOMAINS, domains).apply()
+    }
+
+    fun whitelist(context: Context): Set<String> =
+        prefs(context).getStringSet(KEY_WHITELIST, emptySet())?.toSet() ?: emptySet()
+
+    fun setWhitelist(context: Context, domains: Set<String>) {
+        prefs(context).edit().putStringSet(KEY_WHITELIST, domains).apply()
+    }
+
+    fun listIds(context: Context): Set<String> =
+        prefs(context).getStringSet(KEY_LIST_IDS, null) ?: defaultListIds()
+
+    fun setListIds(context: Context, ids: Set<String>) {
+        prefs(context).edit().putStringSet(KEY_LIST_IDS, ids).apply()
+    }
+
+    private fun defaultListIds(): Set<String> = setOf("oisd_small")
+
+    fun endpoint(context: Context, default: String): String =
+        prefs(context).getString(KEY_ENDPOINT, default) ?: default
+
+    fun setEndpoint(context: Context, endpoint: String) {
+        prefs(context).edit().putString(KEY_ENDPOINT, endpoint).apply()
     }
 
     fun getBoolean(context: Context, key: String, default: Boolean): Boolean =
@@ -51,4 +77,5 @@ object AppPrefs {
     const val KEY_AD_FREE_UNTIL = "ad_free_until"
     const val KEY_QUERIES_TOTAL = "queries_total"
     const val KEY_QUERIES_BLOCKED = "queries_blocked"
+    const val KEY_VPN_WAS_RUNNING = "vpn_was_running"
 }

@@ -13,6 +13,12 @@ object VpnState {
     val adFreeUntil = MutableStateFlow(0L)
     /** Domains the user added manually; unioned with the downloaded blocklist. */
     val customBlocklist = MutableStateFlow(emptySet<String>())
+    /** User whitelist domains: never blocked, even if a blocklist matches. */
+    val whitelist = MutableStateFlow(emptySet<String>())
+    /** Selected blocklist ids (BlocklistManager.AVAILABLE ids). */
+    val selectedLists = MutableStateFlow(emptySet<String>())
+    /** DoH endpoint currently in use. */
+    val dohEndpoint = MutableStateFlow("")
     /** UIDs excluded from the VPN entirely (Rethink-style "skip apps"). */
     val skippedUids = MutableStateFlow(emptySet<Int>())
 
