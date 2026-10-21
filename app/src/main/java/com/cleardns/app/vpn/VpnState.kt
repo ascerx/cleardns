@@ -6,24 +6,41 @@ import kotlinx.coroutines.flow.MutableStateFlow
  * Shared in-memory state between the VPN service, the UI and the quick-settings tile.
  */
 object VpnState {
+    // ---- VPN lifecycle ----
     val isRunning = MutableStateFlow(false)
+    /** "dns" = DNS-only (narrow route, fast); "firewall" = DNS + Firewall (full tunnel, firestack). */
+    val mode = MutableStateFlow("dns")
+
+    // ---- DNS filtering ----
     val blockingEnabled = MutableStateFlow(true)
     val queriesTotal = MutableStateFlow(0L)
     val queriesBlocked = MutableStateFlow(0L)
-    val adFreeUntil = MutableStateFlow(0L)
-    /** Domains the user added manually; unioned with the downloaded blocklist. */
     val customBlocklist = MutableStateFlow(emptySet<String>())
-    /** User whitelist domains: never blocked, even if a blocklist matches. */
     val whitelist = MutableStateFlow(emptySet<String>())
-    /** Selected blocklist ids (BlocklistManager.AVAILABLE ids). */
     val selectedLists = MutableStateFlow(emptySet<String>())
-    /** DoH endpoint currently in use. */
     val dohEndpoint = MutableStateFlow("")
-    /** UIDs excluded from the VPN entirely (Rethink-style "skip apps"). */
+
+    // ---- Firewall (full-tunnel mode) ----
+    /** Per-uid app rules: "bypass" | "block". Absent = filtered (default). */
+    val appRules = MutableStateFlow(emptyMap<Int, String>())
+    /** UIDs excluded from the VPN entirely (legacy key kept for bypass UI). */
     val skippedUids = MutableStateFlow(emptySet<Int>())
+
+    // ---- Network monitor (full-tunnel mode) ----
+    val connLog = MutableStateFlow(emptyList<ConnLogEntry>())
+    /** uid -> [connections, blockedConnections, rx, tx] */
+    val appStats = MutableStateFlow(emptyMap<Int, LongArray>())
+
+    // ---- Ads ----
+    val adFreeUntil = MutableStateFlow(0L)
 
     fun resetCounters() {
         queriesTotal.value = 0L
         queriesBlocked.value = 0L
+    }
+
+    fun clearMonitor() {
+        connLog.value = emptyList()
+        appStats.value = emptyMap()
     }
 }

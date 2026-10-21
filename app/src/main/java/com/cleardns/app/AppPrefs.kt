@@ -17,6 +17,32 @@ object AppPrefs {
     private const val KEY_WHITELIST = "whitelist"
     private const val KEY_LIST_IDS = "list_ids"
     private const val KEY_ENDPOINT = "doh_endpoint"
+    private const val KEY_MODE = "mode"
+    private const val KEY_APP_RULES = "app_rules"
+
+    fun mode(context: Context, default: String): String =
+        prefs(context).getString(KEY_MODE, default) ?: default
+
+    fun setMode(context: Context, mode: String) {
+        prefs(context).edit().putString(KEY_MODE, mode).apply()
+    }
+
+    /** Per-uid firewall rules stored as "uid:state" entries. */
+    fun appRules(context: Context): Map<Int, String> =
+        prefs(context).getStringSet(KEY_APP_RULES, emptySet())
+            ?.mapNotNull { entry ->
+                val parts = entry.split(":")
+                if (parts.size == 2 && parts[1] in setOf("bypass", "block")) {
+                    parts[0].toIntOrNull()?.let { it to parts[1] }
+                } else null
+            }
+            ?.toMap() ?: emptyMap()
+
+    fun setAppRules(context: Context, rules: Map<Int, String>) {
+        prefs(context).edit()
+            .putStringSet(KEY_APP_RULES, rules.map { "${it.key}:${it.value}" }.toSet())
+            .apply()
+    }
 
     fun skippedUids(context: Context): Set<Int> =
         prefs(context).getStringSet(KEY_SKIPPED_UIDS, emptySet())

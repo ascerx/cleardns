@@ -12,8 +12,8 @@ android {
         applicationId = "com.cleardns.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "2.0.0"
 
         // AdMob App ID. Placeholder = Google's test app ID.
         // TODO: replace with the real ID from your AdMob console (App settings) before publishing.
@@ -67,4 +67,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
     implementation(libs.play.services.ads)
+
+    // Firestack: motor de VPN/DNS/firewall de RethinkDNS (gomobile AAR precompilado).
+    implementation("com.github.celzero:firestack:28834df5cd@aar")
 }
