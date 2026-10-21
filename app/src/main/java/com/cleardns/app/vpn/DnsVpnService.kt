@@ -84,6 +84,7 @@ class DnsVpnService : VpnService(), Bridge {
                     refreshNotification()
                 }
                 ACTION_STOP -> {
+                    VpnState.userStopRequested = true
                     saveCounters()
                     ServiceCompat.stopForeground(this@DnsVpnService, ServiceCompat.STOP_FOREGROUND_REMOVE)
                     stopSelf()
@@ -103,14 +104,30 @@ class DnsVpnService : VpnService(), Bridge {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null) {
+            // System redelivery (START_STICKY). If the user asked to stop, stay stopped.
+            if (VpnState.userStopRequested) {
+                saveCounters()
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            // Service was killed by the system (OOM etc.): restore the VPN.
+            startAsForeground()
+            startVpn()
+            return START_STICKY
+        }
         startAsForeground()
-        when (intent?.action) {
+        when (intent.action) {
             ACTION_RESTART -> {
                 Log.i(TAG, "Restarting VPN (settings changed)")
                 stopVpnInternal()
                 startVpn()
             }
-            else -> startVpn()
+            else -> {
+                VpnState.userStopRequested = false
+                startVpn()
+            }
         }
         return START_STICKY
     }

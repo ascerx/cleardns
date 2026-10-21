@@ -11,6 +11,10 @@ object VpnState {
     /** "dns" = DNS-only (narrow route, fast); "firewall" = DNS + Firewall (full tunnel, firestack). */
     val mode = MutableStateFlow("dns")
 
+    /** Set when the user explicitly asked to stop; blocks START_STICKY redelivery. */
+    @Volatile
+    var userStopRequested: Boolean = false
+
     // ---- DNS filtering ----
     val blockingEnabled = MutableStateFlow(true)
     val queriesTotal = MutableStateFlow(0L)

@@ -178,6 +178,7 @@ class MainActivity : ComponentActivity() {
 
     private fun onToggleProtection() {
         if (VpnState.isRunning.value) {
+            VpnState.userStopRequested = true
             stopService(Intent(this, DnsVpnService::class.java))
             saveCounters()
             return
