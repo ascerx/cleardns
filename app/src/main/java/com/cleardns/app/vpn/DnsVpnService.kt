@@ -76,6 +76,7 @@ class DnsVpnService : VpnService(), Bridge {
     private val appStats = HashMap<Int, LongArray>(256)
     private val statsLock = Any()
     private val dnsIdCounter = AtomicLong(0)
+    private val dnsLogCounter = AtomicLong(0)
 
     private val notificationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -204,17 +205,30 @@ class DnsVpnService : VpnService(), Bridge {
         }
         firewallTun = fd
         try {
+            val endpoint = VpnState.dohEndpoint.value.ifEmpty { DohClient.DEFAULT_ENDPOINT }
+            // CRITICAL: without setTunMode, the engine neither intercepts DNS
+            // (queries would be proxied to the nonexistent fake DNS on the real
+            // network) nor filters connections (no firewall).
+            com.celzero.firestack.settings.Settings.setTunMode(
+                com.celzero.firestack.settings.Settings.DNSModeIP,
+                com.celzero.firestack.settings.Settings.BlockModeFilter,
+                com.celzero.firestack.settings.Settings.PtModeAuto,
+            )
+            // The engine needs a bootstrap resolver (DefaultDNS) or DNS never resolves:
+            // without it, the "Goos" resolver would loop back into our own fake DNS.
+            // Bootstrap IPs are required for hostname-based DoH URLs (catch-22 otherwise).
+            val bootstrapIps = if (endpoint.contains("cloudflare")) "1.1.1.1:53,1.0.0.1:53" else "8.8.8.8:53,8.8.4.4:53"
+            val defaultDns = Intra.newDefaultDNS(Backend.DOH, endpoint, bootstrapIps)
             val t = Intra.connect(
                 fd.getFd().toLong(),
                 1500L, // link mtu
                 1500L, // tun mtu
                 "$TUN_ADDRESS/24,fd66:f83a:c650::1/120",
                 "$DNS_IP:53,fd66:f83a:c650::3:53",
-                null, // DefaultDNS: added as DoH transport below
+                defaultDns,
                 this, // Bridge
             )
             tunnel = t
-            val endpoint = VpnState.dohEndpoint.value.ifEmpty { DohClient.DEFAULT_ENDPOINT }
             Intra.addDoHTransport(t, "Preferred", endpoint, "")
             Intra.addDoHTransport(t, "Plus", DohClient.CLOUDFLARE_ENDPOINT, "")
             AppPrefs.putBoolean(applicationContext, AppPrefs.KEY_VPN_WAS_RUNNING, true)
@@ -347,7 +361,16 @@ class DnsVpnService : VpnService(), Bridge {
         }
 
         val mark = Mark()
-        mark.setPIDCSV(if (block) Backend.Block else Backend.Exit)
+        // Engine contract (firestack common.go): DNS flows must be marked "Base"
+        // so dnsx traps and resolves them; "Exit" = protected direct egress
+        // (used for our own app's traffic to avoid loops); "Block" = dropped.
+        val egressPid = when {
+            block -> Backend.Block
+            isFakeDnsTarget(dst) -> Backend.Base // must be Base: dnsx traps it here
+            self -> Backend.Exit // our own traffic: protected direct egress (no loop)
+            else -> Backend.Base
+        }
+        mark.setPIDCSV(egressPid)
         mark.setCID(newConnId())
         mark.setUID(realUid.toString())
 
@@ -404,18 +427,23 @@ class DnsVpnService : VpnService(), Bridge {
     // ------------------------------------------------------- DNS listener
 
     override fun onQuery(who: String?, uid: String?, domain: String?, qtyp: Long): DNSOpts? {
+        if (dnsLogCounter.incrementAndGet() <= 30) {
+            Log.d(TAG, "onQuery: who=$who uid=$uid domain=$domain qtyp=$qtyp")
+        }
         if (domain == null) return null
         val realUid = uid?.toIntOrNull() ?: -1
         val appId = if (realUid < 0) -1 else realUid % 100000
-        val appBlocked = appId >= 0 && VpnState.blockingEnabled.value &&
+        val appBlocked = realUid >= 0 && VpnState.blockingEnabled.value &&
             (VpnState.appRules.value[appId] == RULE_BLOCK || VpnState.appRules.value[realUid] == RULE_BLOCK)
         val domainBlocked = VpnState.blockingEnabled.value && BlocklistManager.isBlocked(domain)
-        if (!appBlocked && !domainBlocked) return null
+        // The engine FAILS CLOSED on null: always return explicit options.
+        VpnState.queriesTotal.value = totalCount.incrementAndGet()
+        if (appBlocked || domainBlocked) VpnState.queriesBlocked.value = blockedCount.incrementAndGet()
         val opts = DNSOpts()
         opts.setUID(uid ?: "-1")
         opts.setIPCSV("")
-        opts.setTIDCSV(Backend.BlockAll)
-        opts.setTIDSECCSV("")
+        opts.setTIDCSV(if (appBlocked || domainBlocked) Backend.BlockAll else "Preferred")
+        opts.setTIDSECCSV(if (appBlocked || domainBlocked) "" else "Plus")
         return opts
     }
 
@@ -476,16 +504,28 @@ class DnsVpnService : VpnService(), Bridge {
 
     // -------------------------------------------------------------- controller
 
-    override fun bind4(who: String?, addrport: String?, fd: Long) {}
-    override fun bind6(who: String?, addrport: String?, fd: Long) {}
+    // firestack's dialers call Bind4/Bind6 (not Protect) via RawConn.Control
+    // for global-unicast destinations. Without VpnService.protect() here, the
+    // engine's sockets route back into our own TUN and time out.
+    override fun bind4(who: String?, addrport: String?, fd: Long) = protectFd(fd)
 
-    override fun protect(who: String?, fd: Long) {
-        try {
+    override fun bind6(who: String?, addrport: String?, fd: Long) = protectFd(fd)
+
+    private fun protectFd(fd: Long) {
+        val ok = try {
             protect(fd.toInt()) // VpnService.protect(int)
         } catch (e: Exception) {
             Log.w(TAG, "protect($fd) failed: ${e.message}")
+            false
+        }
+        if (protectLogCounter.incrementAndGet() <= 10) {
+            Log.i(TAG, "protect(who, fd=$fd) -> $ok")
         }
     }
+
+    override fun protect(who: String?, fd: Long) = protectFd(fd)
+
+    private val protectLogCounter = AtomicLong(0)
 
     // --------------------------------------------------------------- helpers
 
@@ -608,6 +648,12 @@ class DnsVpnService : VpnService(), Bridge {
 
     private fun newConnId(): String =
         java.util.UUID.randomUUID().toString().replace("-", "").take(8)
+
+    private fun isFakeDnsTarget(dst: String?): Boolean {
+        if (dst == null) return false
+        val host = dst.substringBeforeLast(':').trim('[', ']', ' ')
+        return host == DNS_IP || host == "fd66:f83a:c650::3"
+    }
 
     private fun pushLog(entry: ConnLogEntry) {
         connLog.offer(entry)

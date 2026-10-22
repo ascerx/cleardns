@@ -11,6 +11,7 @@ import android.graphics.drawable.Drawable
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.RepeatMode
@@ -61,6 +62,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.lifecycleScope
 import com.cleardns.app.vpn.BlocklistManager
 import com.cleardns.app.vpn.ConnLogEntry
 import com.cleardns.app.vpn.DnsVpnService
@@ -74,6 +76,7 @@ import com.google.android.gms.ads.FullScreenContentCallback
 import com.google.android.gms.ads.rewarded.RewardedAd
 import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
@@ -156,7 +159,12 @@ class MainActivity : ComponentActivity() {
         VpnState.mode.value = AppPrefs.mode(this, DnsVpnService.MODE_DNS)
         BlocklistManager.load(this)
 
-        loadRewardedAd()
+        // Wait for AdMob init before loading any ad (prevents main-thread class-lock
+        // contention with MobileAds.initialize).
+        lifecycleScope.launch {
+            ClearDnsApp.adsInitialized.first { it }
+            withContext(Dispatchers.Main.immediate) { loadRewardedAd() }
+        }
 
         setContent {
             MaterialTheme(
@@ -187,7 +195,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onToggleProtection() {
+        Log.d("ClearDnsUI", "onToggle called: isRunning=${VpnState.isRunning.value}")
         syncServiceState()
+        Log.d("ClearDnsUI", "after sync: isRunning=${VpnState.isRunning.value}")
         if (VpnState.isRunning.value) {
             VpnState.userStopRequested = true
             stopService(Intent(this, DnsVpnService::class.java))
@@ -201,6 +211,7 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         if (VpnService.prepare(this) == null) {
+            Log.d("ClearDnsUI", "prepare ok -> startService")
             startService(Intent(this, DnsVpnService::class.java))
         } else {
             startActivityForResult(VpnService.prepare(this), REQUEST_VPN)
