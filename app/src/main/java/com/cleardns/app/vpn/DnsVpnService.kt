@@ -98,6 +98,12 @@ class DnsVpnService : VpnService(), Bridge {
     override fun onCreate() {
         super.onCreate()
         BlocklistManager.load(this)
+        StatsStore.load(this)
+        VpnState.ipRules.value = AppPrefs.ipRules(this)
+        VpnState.isolateDomains.value = AppPrefs.isolateDomains(this)
+        VpnState.safetyQuic.value = AppPrefs.safety(this, KEY_SAFETY_QUIC, false)
+        VpnState.safetyHttp.value = AppPrefs.safety(this, KEY_SAFETY_HTTP, false)
+        VpnState.safetyPrivate.value = AppPrefs.safety(this, KEY_SAFETY_PRIVATE, false)
         val filter = IntentFilter().apply {
             addAction(ACTION_PAUSE)
             addAction(ACTION_STOP)
@@ -137,6 +143,7 @@ class DnsVpnService : VpnService(), Bridge {
     override fun onDestroy() {
         unregisterReceiver(notificationReceiver)
         saveCounters()
+        StatsStore.persist()
         stopVpnInternal()
         scope.cancel()
         executor.shutdown()
@@ -318,12 +325,26 @@ class DnsVpnService : VpnService(), Bridge {
         val realUid = resolveUid(protocol, uid, src, dst)
         val appId = realUid % 100000
         val protoName = if (protocol == 6) "tcp" else if (protocol == 17) "udp" else "icmp"
-        val appBlockRule = VpnState.blockingEnabled.value &&
-            (VpnState.appRules.value[appId] == RULE_BLOCK || VpnState.appRules.value[realUid] == RULE_BLOCK)
         val dstIp = dst?.substringBeforeLast(':')?.trim('[', ']') ?: ""
-        val ipBlocked = VpnState.blockingEnabled.value &&
-            dstIp.isNotEmpty() && IpRules.matches(dstIp, VpnState.ipRules.value)
-        val block = appBlockRule || ipBlocked
+        val dstPort = dst?.substringAfterLast(':')?.toIntOrNull() ?: -1
+        val self = realUid == android.os.Process.myUid()
+
+        val block = if (self) {
+            false
+        } else if (!VpnState.blockingEnabled.value) {
+            false
+        } else {
+            val rule = VpnState.appRules.value[appId] ?: VpnState.appRules.value[realUid]
+            val metered = isMeteredNow()
+            (when {
+                rule == RULE_BLOCK -> true
+                rule == RULE_WIFI -> !metered // block_wifi: only on unmetered networks
+                rule == RULE_MOBILE -> metered
+                rule == RULE_ISOLATE -> !isolateAllows(realUid, appId, probableDomains, domains, dstIp)
+                rule == RULE_BYPASS || rule == null -> false
+                else -> false
+            }) || IpRules.matches(dstIp, VpnState.ipRules.value) || safetyBlocked(protocol, dstIp, dstPort)
+        }
 
         val mark = Mark()
         mark.setPIDCSV(if (block) Backend.Block else Backend.Exit)
@@ -346,6 +367,7 @@ class DnsVpnService : VpnService(), Bridge {
             if (block) s[1]++
             appStats[appId] = s
         }
+        StatsStore.recordConn(appId, block)
         pushLog(entry)
 
         if (block) Log.d(TAG, "FIREWALL: blocked ${appLabel(realUid)} -> $dst")
@@ -374,6 +396,7 @@ class DnsVpnService : VpnService(), Bridge {
             st[3] += s.getTx()
             appStats[appId] = st
         }
+        StatsStore.recordBytes(appId, s.getRx(), s.getTx())
         publishStats()
         updateLogEntry(s.getID(), s.getRx(), s.getTx(), s.getDuration())
     }
@@ -513,6 +536,59 @@ class DnsVpnService : VpnService(), Bridge {
         }
     }
 
+    /** Isolate: only listed domains (or their subdomains) and listed IPs are allowed. */
+    private fun isolateAllows(uid: Int, appId: Int, probableDomains: String?, domains: String?, dstIp: String): Boolean {
+        val allowed = VpnState.isolateDomains.value[uid] ?: VpnState.isolateDomains.value[appId] ?: emptySet()
+        if (allowed.isEmpty()) return false
+        val candidates = sequenceOf(probableDomains, domains)
+            .filterNotNull()
+            .flatMap { it.split(',').asSequence() }
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toList()
+        for (candidate in candidates) {
+            for (allowedDomain in allowed) {
+                if (candidate == allowedDomain || candidate.endsWith(".$allowedDomain")) return true
+            }
+        }
+        if (dstIp.isNotEmpty() && IpRules.matches(dstIp, allowed)) return true
+        return false
+    }
+
+    /** Optional "unsafe traffic" guards: QUIC, cleartext HTTP, private-IP targets. */
+    private fun safetyBlocked(protocol: Int, dstIp: String, dstPort: Int): Boolean {
+        if (VpnState.safetyQuic.value && protocol == 17 && dstPort == 443) return true
+        if (VpnState.safetyHttp.value && protocol == 6 && dstPort == 80) return true
+        if (VpnState.safetyPrivate.value && dstIp.isNotEmpty() && IpRules.isPrivate(dstIp)) return true
+        return false
+    }
+
+    /** Which underlying network is metered? Cached ~1s; ignores the VPN network itself. */
+    private fun isMeteredNow(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - meteredCacheTime < 1000) return meteredCache
+        var result = false
+        try {
+            for (network in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(network) ?: continue
+                if (!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) continue
+                result = !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                break
+            }
+        } catch (_: Exception) {
+        }
+        meteredCacheTime = now
+        meteredCache = result
+        return result
+    }
+
+    @Volatile
+    private var meteredCache: Boolean = false
+
+    @Volatile
+    private var meteredCacheTime: Long = 0L
+
     private fun firstDomain(vararg csvs: String?): String {
         for (csv in csvs) {
             val first = csv?.split(',')?.firstOrNull { it.isNotBlank() }
@@ -650,5 +726,11 @@ class DnsVpnService : VpnService(), Bridge {
         const val MODE_FIREWALL = "firewall"
         const val RULE_BYPASS = "bypass"
         const val RULE_BLOCK = "block"
+        const val RULE_WIFI = "block_wifi"
+        const val RULE_MOBILE = "block_mobile"
+        const val RULE_ISOLATE = "isolate"
+        const val KEY_SAFETY_QUIC = "safety_quic"
+        const val KEY_SAFETY_HTTP = "safety_http"
+        const val KEY_SAFETY_PRIVATE = "safety_private"
     }
 }

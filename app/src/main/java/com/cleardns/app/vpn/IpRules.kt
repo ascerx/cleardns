@@ -18,6 +18,19 @@ object IpRules {
         return false
     }
 
+    /** True for private/loopback/link-local/multicast addresses (RFC 1918 & co). */
+    fun isPrivate(ip: String): Boolean {
+        val bytes = runCatching { InetAddress.getByName(ip).address }.getOrNull() ?: return false
+        return bytes[0].toInt().let { first ->
+            (first == 10) ||
+                (first == 127) ||
+                (first == 172 && bytes.size == 4 && bytes[1].toInt() in 16..31) ||
+                (first == 192 && bytes.size == 4 && bytes[1].toInt() == 168) ||
+                (first == 169 && bytes.size == 4 && bytes[1].toInt() == 254) ||
+                (first in 224..239) // multicast
+        }
+    }
+
     private fun matchRule(bytes: ByteArray, rule: String): Boolean {
         if (rule.contains('/')) {
             val addrPart = rule.substringBefore('/')

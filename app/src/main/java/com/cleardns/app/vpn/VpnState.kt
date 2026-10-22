@@ -25,8 +25,14 @@ object VpnState {
     val dohEndpoint = MutableStateFlow("")
 
     // ---- Firewall (full-tunnel mode) ----
-    /** Per-uid app rules: "bypass" | "block". Absent = filtered (default). */
+    /** Per-uid app rules: "bypass" | "block" | "block_wifi" | "block_mobile" | "isolate". Absent = filtered (default). */
     val appRules = MutableStateFlow(emptyMap<Int, String>())
+    /** Per-uid allowed domains in isolate mode. */
+    val isolateDomains = MutableStateFlow(emptyMap<Int, Set<String>>())
+    /** Safety switches (unsafe traffic blocking). */
+    val safetyQuic = MutableStateFlow(false)
+    val safetyHttp = MutableStateFlow(false)
+    val safetyPrivate = MutableStateFlow(false)
     /** UIDs excluded from the VPN entirely (legacy key kept for bypass UI). */
     val skippedUids = MutableStateFlow(emptySet<Int>())
 

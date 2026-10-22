@@ -20,6 +20,16 @@ object AppPrefs {
     private const val KEY_MODE = "mode"
     private const val KEY_APP_RULES = "app_rules"
     private const val KEY_IP_RULES = "ip_rules"
+    private const val KEY_ISOLATE_DOMAINS = "isolate_domains"
+
+    val VALID_RULES = setOf("block", "bypass", "block_wifi", "block_mobile", "isolate")
+
+    fun safety(context: Context, key: String, default: Boolean): Boolean =
+        prefs(context).getBoolean(key, default)
+
+    fun setSafety(context: Context, key: String, value: Boolean) {
+        prefs(context).edit().putBoolean(key, value).apply()
+    }
 
     fun mode(context: Context, default: String): String =
         prefs(context).getString(KEY_MODE, default) ?: default
@@ -35,12 +45,13 @@ object AppPrefs {
         prefs(context).edit().putStringSet(KEY_IP_RULES, rules).apply()
     }
 
-    /** Per-uid firewall rules stored as "uid:state" entries. */
+    /** Per-uid firewall rules stored as "uid:state" entries.
+     *  States: "block" | "bypass" | "block_wifi" | "block_mobile" | "isolate" */
     fun appRules(context: Context): Map<Int, String> =
         prefs(context).getStringSet(KEY_APP_RULES, emptySet())
             ?.mapNotNull { entry ->
                 val parts = entry.split(":")
-                if (parts.size == 2 && parts[1] in setOf("bypass", "block")) {
+                if (parts.size == 2 && parts[1] in VALID_RULES) {
                     parts[0].toIntOrNull()?.let { it to parts[1] }
                 } else null
             }
@@ -50,6 +61,27 @@ object AppPrefs {
         prefs(context).edit()
             .putStringSet(KEY_APP_RULES, rules.map { "${it.key}:${it.value}" }.toSet())
             .apply()
+    }
+
+    /** Per-uid isolate allow-domains: JSON { uid: csv } */
+    fun isolateDomains(context: Context): Map<Int, Set<String>> {
+        val json = prefs(context).getString(KEY_ISOLATE_DOMAINS, "{}") ?: "{}"
+        return try {
+            val obj = org.json.JSONObject(json)
+            obj.keys().asSequence().mapNotNull { key ->
+                val uid = key.toIntOrNull() ?: return@mapNotNull null
+                val csv = obj.optString(key)
+                uid to csv.split(',').filter { it.isNotBlank() }.toSet()
+            }.toMap()
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    fun setIsolateDomains(context: Context, rules: Map<Int, Set<String>>) {
+        val obj = org.json.JSONObject()
+        rules.forEach { (uid, domains) -> obj.put(uid.toString(), domains.joinToString(",")) }
+        prefs(context).edit().putString(KEY_ISOLATE_DOMAINS, obj.toString()).apply()
     }
 
     fun skippedUids(context: Context): Set<Int> =

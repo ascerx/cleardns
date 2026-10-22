@@ -35,13 +35,17 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GppBad
 import androidx.compose.material.icons.filled.GppGood
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SignalCellularAlt
 import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -61,6 +65,7 @@ import com.cleardns.app.vpn.BlocklistManager
 import com.cleardns.app.vpn.ConnLogEntry
 import com.cleardns.app.vpn.DnsVpnService
 import com.cleardns.app.vpn.DohClient
+import com.cleardns.app.vpn.StatsStore
 import com.cleardns.app.vpn.VpnState
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
@@ -515,6 +520,7 @@ private fun FirewallTab() {
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     var selected by remember { mutableStateOf<AppEntry?>(null) }
+    var editingIsolate by remember { mutableStateOf<Int?>(null) }
     var filter by remember { mutableStateOf("all") }
 
     LaunchedEffect(Unit) {
@@ -539,6 +545,21 @@ private fun FirewallTab() {
                 .sortedBy { it.label.lowercase() }
         }
         loading = false
+    }
+
+    fun setRule(uid: Int, rule: String?) {
+        val current = rules.toMutableMap()
+        if (rule == null) current.remove(uid) else current[uid] = rule
+        VpnState.appRules.value = current
+        AppPrefs.setAppRules(context, current)
+        // Only bypass needs a VPN rebuild (disallowed list); wifi/mobile/isolate
+        // blocks are evaluated per-connection at runtime.
+        val needsRestart = isRunning && (rule == "bypass" || rules[uid] == "bypass")
+        if (needsRestart) {
+            context.startService(
+                Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_RESTART),
+            )
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -626,11 +647,32 @@ private fun FirewallTab() {
                             contentDescription = app.label,
                             modifier = Modifier.size(36.dp),
                         )
-                        Spacer(Modifier.width(12.dp))
+                        Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(app.label, fontSize = 15.sp, color = TextPrimary, maxLines = 1)
                             Text(app.packageName, fontSize = 10.sp, color = TextMuted, maxLines = 1)
                         }
+                        // Quick WiFi/Data block toggles (like Rethink)
+                        QuickRuleIcon(
+                            icon = Icons.Filled.Wifi,
+                            active = rule == "block_wifi",
+                            tint = Red,
+                            contentDesc = "Block WiFi",
+                        ) {
+                            val next = if (rule == "block_wifi") null else "block_wifi"
+                            setRule(app.uid, next)
+                        }
+                        Spacer(Modifier.width(2.dp))
+                        QuickRuleIcon(
+                            icon = Icons.Filled.SignalCellularAlt,
+                            active = rule == "block_mobile",
+                            tint = Pink,
+                            contentDesc = "Block mobile data",
+                        ) {
+                            val next = if (rule == "block_mobile") null else "block_mobile"
+                            setRule(app.uid, next)
+                        }
+                        Spacer(Modifier.width(10.dp))
                         StateBadge(rule)
                     }
                 }
@@ -643,20 +685,92 @@ private fun FirewallTab() {
             label = app.label,
             current = rules[app.uid],
             onPick = { rule ->
-                val current = rules.toMutableMap()
-                if (rule == null) current.remove(app.uid) else current[app.uid] = rule
-                VpnState.appRules.value = current
-                AppPrefs.setAppRules(context, current)
-                if (isRunning) {
-                    context.startService(
-                        Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_RESTART),
-                    )
-                }
+                setRule(app.uid, rule)
+                if (rule == "isolate") editingIsolate = app.uid
                 selected = null
             },
             onDismiss = { selected = null },
         )
     }
+
+    editingIsolate?.let { uid ->
+        IsolateDomainsDialog(
+            uid = uid,
+            onDone = { editingIsolate = null },
+        )
+    }
+}
+
+@Composable
+private fun QuickRuleIcon(
+    icon: ImageVector,
+    active: Boolean,
+    tint: Color,
+    contentDesc: String,
+    onClick: () -> Unit,
+) {
+    Icon(
+        imageVector = icon,
+        contentDescription = contentDesc,
+        tint = if (active) tint else Color(0xFF4A5878),
+        modifier = Modifier
+            .size(24.dp)
+            .clickable(onClick = onClick),
+    )
+}
+
+@Composable
+private fun IsolateDomainsDialog(uid: Int, onDone: () -> Unit) {
+    val context = LocalContext.current
+    val all by VpnState.isolateDomains.collectAsState()
+    val current = all[uid] ?: emptySet()
+    var input by remember { mutableStateOf("") }
+    val appName = remember(uid) {
+        try {
+            context.packageManager.getPackagesForUid(uid)?.firstOrNull()?.let { pkg ->
+                context.packageManager.getApplicationLabel(
+                    context.packageManager.getApplicationInfo(pkg, 0),
+                ).toString()
+            } ?: "uid $uid"
+        } catch (_: Exception) {
+            "uid $uid"
+        }
+    }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDone,
+        title = { Text("Isolate: allowed domains", color = TextPrimary) },
+        text = {
+            Column {
+                Text(
+                    "\"$appName\" may ONLY reach these domains (and subdomains). Empty list = all traffic blocked.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                )
+                Spacer(Modifier.height(8.dp))
+                AddDomainRow(input, { input = it }, Neon) {
+                    val d = input.trim().lowercase().trimEnd('.')
+                    if (d.contains('.') && d.none { it.isWhitespace() }) {
+                        val next = all.toMutableMap()
+                        next[uid] = current + d
+                        VpnState.isolateDomains.value = next
+                        AppPrefs.setIsolateDomains(context, next)
+                        input = ""
+                    }
+                }
+                current.sorted().forEach { domain ->
+                    RuleRow(domain) {
+                        val next = all.toMutableMap()
+                        next[uid] = current - domain
+                        VpnState.isolateDomains.value = next
+                        AppPrefs.setIsolateDomains(context, next)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDone) { Text("Done", color = Neon) } },
+        containerColor = Color(0xFF0D1526),
+    )
 }
 
 @Composable
@@ -685,8 +799,11 @@ private fun RulePickerDialog(label: String, current: String?, onPick: (String?) 
         text = {
             Column {
                 RuleOption("Filtered", "Normal internet + ClearDNS filtering", Neon, current == null) { onPick(null) }
-                RuleOption("Block internet", "Cut all network access for this app", Red, current == "block") { onPick("block") }
+                RuleOption("Block WiFi", "No access on WiFi / unmetered", Violet, current == "block_wifi") { onPick("block_wifi") }
+                RuleOption("Block mobile data", "No access on cellular / metered", Pink, current == "block_mobile") { onPick("block_mobile") }
+                RuleOption("Block internet", "Cut all network access", Red, current == "block") { onPick("block") }
                 RuleOption("Bypass", "App skips ClearDNS entirely (system DNS)", Amber, current == "bypass") { onPick("bypass") }
+                RuleOption("Isolate", "Only its own allowed domains work", Green, current == "isolate") { onPick("isolate") }
             }
         },
         confirmButton = {},
@@ -759,7 +876,7 @@ private fun MonitorTab() {
             containerColor = Color.Transparent,
             contentColor = Neon,
         ) {
-            listOf("Connections", "DNS log", "IP rules").forEachIndexed { i, label ->
+            listOf("Connections", "DNS log", "IP rules", "Reports").forEachIndexed { i, label ->
                 Tab(
                     selected = subTab == i,
                     onClick = { subTab = i },
@@ -923,7 +1040,131 @@ private fun MonitorTab() {
                     }
                 }
             }
+            3 -> ReportsTab(labels)
         }
+    }
+}
+
+@Composable
+private fun ReportsTab(labels: Map<Int, String>) {
+    val stats by VpnState.appStats.collectAsState()
+    val hourly = remember(stats) { StatsStore.hourlyForDay() }
+    val daily = remember(stats) { StatsStore.dailyLast7() }
+    val top = remember(stats) { StatsStore.topAppsToday() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+    ) {
+        SectionLabel("Today by hour", Neon)
+        val maxVal = hourly.maxOf { it[0] }.coerceAtLeast(1)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(120.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF0C1424))
+                .padding(8.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            hourly.forEachIndexed { hour, h ->
+                val frac = h[0].toFloat() / maxVal
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Bottom,
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                ) {
+                    if (h[1] > 0) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(((h[1].toFloat() / maxVal) * 40).dp.coerceAtLeast(2.dp))
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Pink),
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height((frac * 70).dp.coerceAtLeast(if (h[0] > 0) 3.dp else 1.dp))
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(
+                                if (h[0] > 0) Brush.verticalGradient(listOf(Neon, Violet))
+                                else Brush.verticalGradient(listOf(CardBorder, CardBorder)),
+                            ),
+                    )
+                }
+            }
+        }
+        Text(
+            "24h — blue: connections · pink: blocked",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextMuted,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        Spacer(Modifier.height(16.dp))
+
+        SectionLabel("Last 7 days", Violet)
+        daily.forEach { (day, arr) ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(day, fontSize = 13.sp, color = TextMuted, modifier = Modifier.width(90.dp))
+                Text(
+                    "${formatCount(arr[0])} conns · ↓↑ ${formatCount(arr[2] + arr[3])}B · ${formatCount(arr[1])} blocked",
+                    fontSize = 12.sp,
+                    color = TextPrimary,
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+
+        SectionLabel("Top apps today", Pink)
+        if (top.isEmpty()) {
+            Text(
+                "No data yet — connect in DNS + Firewall mode.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextMuted,
+            )
+        } else {
+            top.entries.sortedByDescending { it.value[0] }.take(10).forEach { (uid, arr) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        labels[uid] ?: "uid $uid",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                    )
+                    Text(
+                        "${formatCount(arr[0])} conns · ↓ ${formatCount(arr[2])} ↑ ${formatCount(arr[3])}",
+                        fontSize = 11.sp,
+                        color = TextMuted,
+                    )
+                    if (arr[1] > 0) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "${formatCount(arr[1])}✕",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Red,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
     }
 }
 
@@ -1166,6 +1407,26 @@ private fun SettingsTab(onWatchAd: () -> Unit) {
         }
         Spacer(Modifier.height(12.dp))
 
+        SectionLabel("Unsafe traffic", Red)
+        val quic by VpnState.safetyQuic.collectAsState()
+        val http by VpnState.safetyHttp.collectAsState()
+        val priv by VpnState.safetyPrivate.collectAsState()
+        NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            SafetyRow("Block QUIC (UDP 443)", "Forces apps to use TCP + TLS, more inspectable", quic) {
+                VpnState.safetyQuic.value = it
+                AppPrefs.setSafety(context, DnsVpnService.KEY_SAFETY_QUIC, it)
+            }
+            SafetyRow("Block cleartext HTTP (port 80)", "Only HTTPS gets through", http) {
+                VpnState.safetyHttp.value = it
+                AppPrefs.setSafety(context, DnsVpnService.KEY_SAFETY_HTTP, it)
+            }
+            SafetyRow("Block private-IP targets", "Stops apps from reaching LAN/loopback", priv) {
+                VpnState.safetyPrivate.value = it
+                AppPrefs.setSafety(context, DnsVpnService.KEY_SAFETY_PRIVATE, it)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
         SectionLabel("Support the project", Green)
         NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             if (adsHidden) {
@@ -1200,6 +1461,24 @@ private fun SettingsTab(onWatchAd: () -> Unit) {
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun SafetyRow(title: String, desc: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = TextPrimary, fontSize = 14.sp)
+            Text(desc, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onChecked,
+            colors = SwitchDefaults.colors(checkedTrackColor = Red, checkedThumbColor = Bg0),
+        )
     }
 }
 
