@@ -72,8 +72,10 @@ class DnsVpnService : VpnService(), Bridge {
     private val ownerCache = HashMap<String, Int>(1024)
     private val ownerLock = Any()
     private val connLog = ConcurrentLinkedQueue<ConnLogEntry>()
+    private val dnsLog = ConcurrentLinkedQueue<DnsLogEntry>()
     private val appStats = HashMap<Int, LongArray>(256)
     private val statsLock = Any()
+    private val dnsIdCounter = AtomicLong(0)
 
     private val notificationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -316,8 +318,12 @@ class DnsVpnService : VpnService(), Bridge {
         val realUid = resolveUid(protocol, uid, src, dst)
         val appId = realUid % 100000
         val protoName = if (protocol == 6) "tcp" else if (protocol == 17) "udp" else "icmp"
-        val block = VpnState.blockingEnabled.value &&
+        val appBlockRule = VpnState.blockingEnabled.value &&
             (VpnState.appRules.value[appId] == RULE_BLOCK || VpnState.appRules.value[realUid] == RULE_BLOCK)
+        val dstIp = dst?.substringBeforeLast(':')?.trim('[', ']') ?: ""
+        val ipBlocked = VpnState.blockingEnabled.value &&
+            dstIp.isNotEmpty() && IpRules.matches(dstIp, VpnState.ipRules.value)
+        val block = appBlockRule || ipBlocked
 
         val mark = Mark()
         mark.setPIDCSV(if (block) Backend.Block else Backend.Exit)
@@ -401,7 +407,21 @@ class DnsVpnService : VpnService(), Bridge {
     ): DNSOpts? = null
 
     override fun onResponse(smm: DNSSummary?) {
-        // DNS log counting (MVP): count per query in firewall mode.
+        if (smm == null) return
+        val uid = smm.getUID()?.toIntOrNull() ?: -1
+        val entry = DnsLogEntry(
+            id = smm.getID() ?: ("q${dnsIdCounter.incrementAndGet()}"),
+            uid = uid,
+            domain = smm.getQName() ?: "",
+            rcode = smm.getRCode().toInt(),
+            cached = smm.getCached(),
+            latencyMs = (smm.getLatency() * 1000).toLong(),
+            timestamp = System.currentTimeMillis(),
+        )
+        if (entry.domain.isEmpty()) return
+        dnsLog.offer(entry)
+        while (dnsLog.size > MAX_LOG) dnsLog.poll()
+        VpnState.dnsLog.value = dnsLog.toList()
     }
 
     // ---------------------------------------------- resolver/proxy/server listeners

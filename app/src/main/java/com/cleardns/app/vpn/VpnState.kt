@@ -32,6 +32,9 @@ object VpnState {
 
     // ---- Network monitor (full-tunnel mode) ----
     val connLog = MutableStateFlow(emptyList<ConnLogEntry>())
+    val dnsLog = MutableStateFlow(emptyList<DnsLogEntry>())
+    /** User IP rules: exact IP or CIDR strings to block. */
+    val ipRules = MutableStateFlow(emptySet<String>())
     /** uid -> [connections, blockedConnections, rx, tx] */
     val appStats = MutableStateFlow(emptyMap<Int, LongArray>())
 
@@ -45,6 +48,7 @@ object VpnState {
 
     fun clearMonitor() {
         connLog.value = emptyList()
+        dnsLog.value = emptyList()
         appStats.value = emptyMap()
     }
 }

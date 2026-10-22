@@ -13,8 +13,6 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -28,21 +26,22 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GppBad
 import androidx.compose.material.icons.filled.GppGood
-import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -80,7 +79,6 @@ private val Bg0 = Color(0xFF060A13)
 private val Bg1 = Color(0xFF0B1122)
 private val Bg2 = Color(0xFF111A33)
 private val Neon = Color(0xFF00E5FF)
-private val NeonDim = Color(0xFF0891B2)
 private val Violet = Color(0xFF8B5CF6)
 private val Pink = Color(0xFFF472B6)
 private val Green = Color(0xFF34D399)
@@ -93,26 +91,11 @@ private val TextMuted = Color(0xFF8296B8)
 
 private val GlowBrush = Brush.verticalGradient(listOf(Neon, Violet))
 private val DangerBrush = Brush.verticalGradient(listOf(Red, Pink))
-
-private val CardShape = RoundedCornerShape(20.dp)
-
-@Composable
-private fun GlowBackground(content: @Composable () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(listOf(Bg0, Bg1, Bg2)),
-            ),
-    ) {
-        content()
-    }
-}
+private val CardShape = RoundedCornerShape(18.dp)
 
 @Composable
 private fun NeonCard(
     modifier: Modifier = Modifier,
-    brush: Brush? = null,
     onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -120,16 +103,32 @@ private fun NeonCard(
         .fillMaxWidth()
         .border(1.dp, CardBorder, CardShape)
         .clip(CardShape)
-    if (brush != null) m = m.border(1.5.dp, brush, CardShape)
     Card(
-        modifier = (if (onClick != null) m.clickable(onClick = onClick) else m),
+        modifier = if (onClick != null) m.clickable(onClick = onClick) else m,
         shape = CardShape,
         colors = CardDefaults.cardColors(containerColor = CardBg),
-        content = { Column(modifier = Modifier.padding(16.dp), content = content) },
+    ) {
+        Column(modifier = Modifier.padding(16.dp), content = content)
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String, accent: Color = Neon) {
+    Text(
+        text.uppercase(),
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.Black,
+        letterSpacing = 1.5.sp,
+        color = accent,
+        modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp),
     )
 }
 
-private enum class Screen { Home, Apps, Domains, Lists, Monitor }
+private fun formatCount(n: Long): String = when {
+    n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
+    n >= 1_000 -> String.format("%.1fK", n / 1_000.0)
+    else -> n.toString()
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -144,6 +143,7 @@ class MainActivity : ComponentActivity() {
         VpnState.queriesBlocked.value = AppPrefs.getLong(this, AppPrefs.KEY_QUERIES_BLOCKED, 0L)
         VpnState.skippedUids.value = AppPrefs.skippedUids(this)
         VpnState.appRules.value = AppPrefs.appRules(this)
+        VpnState.ipRules.value = AppPrefs.ipRules(this)
         VpnState.customBlocklist.value = AppPrefs.customDomains(this)
         VpnState.whitelist.value = AppPrefs.whitelist(this)
         VpnState.selectedLists.value = AppPrefs.listIds(this)
@@ -165,8 +165,12 @@ class MainActivity : ComponentActivity() {
                     onSurface = TextPrimary,
                 ),
             ) {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color.Transparent) {
-                    GlowBackground {
+                Surface(modifier = Modifier.fillMaxSize(), color = Bg0) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(Brush.verticalGradient(listOf(Bg0, Bg1, Bg2))),
+                    ) {
                         AppRoot(
                             onToggle = { onToggleProtection() },
                             onWatchAd = { showRewardedAd() },
@@ -247,8 +251,6 @@ class MainActivity : ComponentActivity() {
         syncServiceState()
     }
 
-    /** UI must reflect the real service state, not in-process memory:
-     *  the OS may have killed the service in the background. */
     private fun syncServiceState() {
         val running = try {
             getSystemService(ActivityManager::class.java)
@@ -270,67 +272,69 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// ================= App root: bottom navigation =================
+
 @Composable
 private fun AppRoot(onToggle: () -> Unit, onWatchAd: () -> Unit) {
-    var screen by remember { mutableStateOf(Screen.Home) }
-    when (screen) {
-        Screen.Home -> HomeScreen(
-            onToggle = onToggle,
-            onWatchAd = onWatchAd,
-            onOpenApps = { screen = Screen.Apps },
-            onOpenDomains = { screen = Screen.Domains },
-            onOpenLists = { screen = Screen.Lists },
-            onOpenMonitor = { screen = Screen.Monitor },
-        )
-        Screen.Apps -> AppsScreen(onBack = { screen = Screen.Home })
-        Screen.Domains -> DomainsScreen(onBack = { screen = Screen.Home })
-        Screen.Lists -> ListsScreen(onBack = { screen = Screen.Home })
-        Screen.Monitor -> MonitorScreen(onBack = { screen = Screen.Home })
+    var tab by remember { mutableStateOf(0) }
+    Scaffold(
+        containerColor = Color.Transparent,
+        bottomBar = {
+            NavigationBar(containerColor = Color(0xFF0A101F)) {
+                val items = listOf(
+                    Triple(Icons.Filled.Shield, "Home", 0),
+                    Triple(Icons.Filled.Tune, "Firewall", 1),
+                    Triple(Icons.Filled.Visibility, "Monitor", 2),
+                    Triple(Icons.Filled.Public, "DNS", 3),
+                    Triple(Icons.Filled.Settings, "Settings", 4),
+                )
+                items.forEach { (icon, label, index) ->
+                    NavigationBarItem(
+                        selected = tab == index,
+                        onClick = { tab = index },
+                        icon = { Icon(icon, null, tint = if (tab == index) Neon else TextMuted) },
+                        label = {
+                            Text(label, color = if (tab == index) Neon else TextMuted, fontSize = 10.sp)
+                        },
+                        colors = NavigationBarItemDefaults.colors(
+                            indicatorColor = Neon.copy(alpha = 0.15f),
+                        ),
+                    )
+                }
+            }
+        },
+    ) { inner ->
+        Box(Modifier.padding(bottom = inner.calculateBottomPadding())) {
+            when (tab) {
+                0 -> HomeTab(onToggle = onToggle, onWatchAd = onWatchAd, onGoTo = { tab = it })
+                1 -> FirewallTab()
+                2 -> MonitorTab()
+                3 -> DnsTab()
+                4 -> SettingsTab(onWatchAd = onWatchAd)
+            }
+        }
     }
 }
 
-@Composable
-private fun ScreenHeader(title: String, subtitle: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(8.dp, 16.dp, 16.dp, 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
-        }
-        Column {
-            Text(title, fontWeight = FontWeight.Bold, fontSize = 20.sp, color = TextPrimary)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextMuted)
-        }
-    }
-}
+// ================= HOME =================
 
 @Composable
-private fun HomeScreen(
-    onToggle: () -> Unit,
-    onWatchAd: () -> Unit,
-    onOpenApps: () -> Unit,
-    onOpenDomains: () -> Unit,
-    onOpenLists: () -> Unit,
-    onOpenMonitor: () -> Unit,
-) {
+private fun HomeTab(onToggle: () -> Unit, onWatchAd: () -> Unit, onGoTo: (Int) -> Unit) {
     val isRunning by VpnState.isRunning.collectAsState()
     val blocking by VpnState.blockingEnabled.collectAsState()
     val total by VpnState.queriesTotal.collectAsState()
     val blocked by VpnState.queriesBlocked.collectAsState()
-    val adFreeUntil by VpnState.adFreeUntil.collectAsState()
-    val refreshing by BlocklistManager.isRefreshing.collectAsState()
     val mode by VpnState.mode.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val refreshing by BlocklistManager.isRefreshing.collectAsState()
+    val adFreeUntil by VpnState.adFreeUntil.collectAsState()
 
     val pulse = rememberInfiniteTransition(label = "pulse")
     val glowAlpha by pulse.animateFloat(
-        initialValue = 0.25f,
-        targetValue = if (isRunning) 0.9f else 0.25f,
-        animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Reverse),
+        initialValue = 0.2f,
+        targetValue = if (isRunning) 0.85f else 0.2f,
+        animationSpec = infiniteRepeatable(tween(1300), RepeatMode.Reverse),
         label = "glow",
     )
 
@@ -338,27 +342,25 @@ private fun HomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp),
+            .padding(horizontal = 18.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(20.dp))
-
-        // ---- Status ----
+        Spacer(Modifier.height(8.dp))
         Box(contentAlignment = Alignment.Center) {
             Box(
                 modifier = Modifier
-                    .size(104.dp)
-                    .border(10.dp, Neon.copy(alpha = glowAlpha * 0.35f), CircleShape)
-                    .border(2.dp, if (isRunning) Neon else TextMuted, CircleShape),
+                    .size(96.dp)
+                    .border(10.dp, Neon.copy(alpha = glowAlpha * 0.4f), androidx.compose.foundation.shape.CircleShape)
+                    .border(2.dp, if (isRunning) Neon else TextMuted, androidx.compose.foundation.shape.CircleShape),
             )
             Icon(
                 imageVector = if (isRunning) Icons.Filled.GppGood else Icons.Filled.GppBad,
                 contentDescription = null,
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(44.dp),
                 tint = if (isRunning) Neon else TextMuted,
             )
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
             text = if (isRunning) "Protected" else "Protection off",
             style = MaterialTheme.typography.headlineMedium,
@@ -367,7 +369,7 @@ private fun HomeScreen(
         )
         Text(
             text = when {
-                isRunning && blocking && mode == "firewall" -> "DNS + Firewall · full tunnel"
+                isRunning && blocking && mode == DnsVpnService.MODE_FIREWALL -> "DNS + Firewall · full tunnel"
                 isRunning && blocking -> "Encrypted DNS · tracker blocking"
                 isRunning -> "Blocking paused"
                 else -> "Tap start to shield your device"
@@ -375,36 +377,12 @@ private fun HomeScreen(
             style = MaterialTheme.typography.bodyMedium,
             color = if (isRunning && !blocking) Amber else TextMuted,
         )
-        Spacer(Modifier.height(20.dp))
-
-        // ---- Mode selector ----
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            ModeChip("DNS only", Icons.Filled.Public, mode == "dns", Modifier.weight(1f)) {
-                VpnState.mode.value = DnsVpnService.MODE_DNS
-                AppPrefs.setMode(context, DnsVpnService.MODE_DNS)
-            }
-            ModeChip("DNS + Firewall", Icons.Filled.Bolt, mode == "firewall", Modifier.weight(1f)) {
-                VpnState.mode.value = DnsVpnService.MODE_FIREWALL
-                AppPrefs.setMode(context, DnsVpnService.MODE_FIREWALL)
-            }
-        }
-        Text(
-            text = "Mode changes apply on the next VPN start",
-            style = MaterialTheme.typography.labelSmall,
-            color = TextMuted,
-            modifier = Modifier.padding(top = 6.dp),
-        )
-
         Spacer(Modifier.height(16.dp))
 
-        // ---- Start/Stop button ----
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.75f)
-                .height(52.dp)
+                .fillMaxWidth(0.8f)
+                .height(50.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(if (isRunning) DangerBrush else GlowBrush)
                 .clickable(onClick = onToggle),
@@ -413,36 +391,34 @@ private fun HomeScreen(
             Text(
                 if (isRunning) "STOP" else "START",
                 fontWeight = FontWeight.Black,
-                fontSize = 16.sp,
+                fontSize = 15.sp,
                 letterSpacing = 2.sp,
                 color = Bg0,
             )
         }
 
-        Spacer(Modifier.height(20.dp))
-
-        // ---- Stats ----
+        Spacer(Modifier.height(16.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             StatCard("Queries", formatCount(total), Neon, Modifier.weight(1f))
             StatCard("Blocked", formatCount(blocked), Pink, Modifier.weight(1f))
         }
+        Spacer(Modifier.height(12.dp))
 
-        Spacer(Modifier.height(14.dp))
-
-        // ---- Blocking switch ----
         NeonCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
-                    Text("Block trackers", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "${formatCount(BlocklistManager.size().coerceAtLeast(1).toLong())} + ${VpnState.customBlocklist.value.size} domain rules",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted,
-                    )
+                Column(Modifier.weight(1f)) {
+                    Text("Block trackers & ads", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    if (refreshing) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                            color = Neon,
+                            trackColor = Bg2,
+                        )
+                    }
                 }
                 Switch(
                     checked = blocking,
@@ -453,73 +429,22 @@ private fun HomeScreen(
                     colors = SwitchDefaults.colors(checkedTrackColor = Neon, checkedThumbColor = Bg0),
                 )
             }
-            Spacer(Modifier.height(8.dp))
-            if (refreshing) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = Neon,
-                    trackColor = Bg2,
-                )
-                Spacer(Modifier.height(6.dp))
-            }
-            OutlinedButton(
-                onClick = { scope.launch { BlocklistManager.downloadAndMerge(context, VpnState.selectedLists.value) } },
-                enabled = !refreshing,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Neon),
-            ) {
-                Text(if (refreshing) "Updating…" else "Update blocklist")
-            }
         }
+        Spacer(Modifier.height(10.dp))
+        MenuRow(Icons.Filled.Bolt, "Firewall", "Per-app internet access rules", Violet) { onGoTo(1) }
+        MenuRow(Icons.Filled.Visibility, "Network monitor", "Connections, DNS log, IP rules", Neon) { onGoTo(2) }
+        MenuRow(Icons.Filled.Public, "DNS settings", "Blocklists, resolvers, domain rules", Green) { onGoTo(3) }
 
         Spacer(Modifier.height(12.dp))
-
-        // ---- Menu ----
-        MenuRow(Icons.Filled.MonitorHeart, "Network monitor", "Live connections & per-app traffic", Neon, onOpenMonitor)
-        MenuRow(Icons.Filled.Tune, "Apps", "Per-app firewall rules", Violet, onOpenApps)
-        MenuRow(Icons.Filled.Block, "Domain rules", "Custom blocked & allowed domains", Pink, onOpenDomains)
-        MenuRow(Icons.Filled.Search, "Lists & DNS server", "Blocklists and encrypted resolvers", Green, onOpenLists)
-
-        Spacer(Modifier.height(16.dp))
-
-        // ---- Ads ----
         val adsHidden = System.currentTimeMillis() < adFreeUntil
         if (!adsHidden) {
             TextButton(onClick = onWatchAd) {
                 Text("Remove ads for 24 hours (watch video)", color = TextMuted)
             }
-            Spacer(Modifier.height(4.dp))
             BannerAd()
         } else {
-            Text(
-                text = "Ads removed — thanks for your support!",
-                style = MaterialTheme.typography.bodySmall,
-                color = Green,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(60.dp))
-        }
-    }
-}
-
-@Composable
-private fun ModeChip(label: String, icon: ImageVector, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .height(46.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (selected) CardBg else Color(0xFF0C1424))
-            .border(
-                1.5.dp,
-                if (selected) GlowBrush else Brush.verticalGradient(listOf(CardBorder, CardBorder)),
-                RoundedCornerShape(14.dp),
-            )
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Icon(icon, null, tint = if (selected) Neon else TextMuted, modifier = Modifier.size(16.dp))
-            Text(label, color = if (selected) TextPrimary else TextMuted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text("Ads removed — thanks!", color = Green, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(52.dp))
         }
     }
 }
@@ -527,14 +452,12 @@ private fun ModeChip(label: String, icon: ImageVector, selected: Boolean, modifi
 @Composable
 private fun StatCard(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
     Card(
-        modifier = modifier
-            .border(1.dp, CardBorder, CardShape)
-            .clip(CardShape),
+        modifier = modifier.border(1.dp, CardBorder, CardShape).clip(CardShape),
         shape = CardShape,
         colors = CardDefaults.cardColors(containerColor = CardBg),
     ) {
         Column(
-            modifier = Modifier.padding(14.dp).fillMaxWidth(),
+            modifier = Modifier.padding(12.dp).fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = color)
@@ -545,24 +468,18 @@ private fun StatCard(label: String, value: String, color: Color, modifier: Modif
 
 @Composable
 private fun MenuRow(icon: ImageVector, title: String, subtitle: String, accent: Color, onClick: () -> Unit) {
-    NeonCard(modifier = Modifier, onClick = onClick) {
+    NeonCard(onClick = onClick) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, tint = accent, modifier = Modifier.size(26.dp))
+            Icon(icon, null, tint = accent, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextMuted)
             }
-            Text("›", color = TextMuted, fontSize = 22.sp)
+            Text("›", color = TextMuted, fontSize = 20.sp)
         }
     }
     Spacer(Modifier.height(10.dp))
-}
-
-private fun formatCount(n: Long): String = when {
-    n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
-    n >= 1_000 -> String.format("%.1fK", n / 1_000.0)
-    else -> n.toString()
 }
 
 @Composable
@@ -579,7 +496,7 @@ private fun BannerAd() {
     )
 }
 
-// ---------- Apps screen (tri-state firewall rules) ----------
+// ================= FIREWALL =================
 
 private data class AppEntry(
     val uid: Int,
@@ -589,14 +506,16 @@ private data class AppEntry(
 )
 
 @Composable
-private fun AppsScreen(onBack: () -> Unit) {
+private fun FirewallTab() {
     val context = LocalContext.current
     val rules by VpnState.appRules.collectAsState()
     val isRunning by VpnState.isRunning.collectAsState()
+    val mode by VpnState.mode.collectAsState()
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     var selected by remember { mutableStateOf<AppEntry?>(null) }
+    var filter by remember { mutableStateOf("all") }
 
     LaunchedEffect(Unit) {
         loading = true
@@ -622,24 +541,28 @@ private fun AppsScreen(onBack: () -> Unit) {
         loading = false
     }
 
-    fun applyRule(uid: Int, rule: String?) {
-        val current = rules.toMutableMap()
-        if (rule == null) current.remove(uid) else current[uid] = rule
-        VpnState.appRules.value = current
-        AppPrefs.setAppRules(context, current)
-        if (isRunning) {
-            context.startService(
-                Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_RESTART),
-            )
-        }
-    }
-
     Column(modifier = Modifier.fillMaxSize()) {
-        ScreenHeader("Apps", "Tap an app: filter · block internet · bypass ClearDNS", onBack)
+        Text(
+            "Firewall",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Black,
+            color = TextPrimary,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+        )
+        if (mode != DnsVpnService.MODE_FIREWALL) {
+            NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Text("Requires DNS + Firewall mode", color = Amber, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Blocking apps and monitoring connections only work in full-tunnel mode. Switch mode in Home and restart the VPN.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                )
+            }
+        }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
-            placeholder = { Text("Search", color = TextMuted) },
+            placeholder = { Text("Search apps…", color = TextMuted) },
             leadingIcon = { Icon(Icons.Filled.Search, null, tint = TextMuted) },
             singleLine = true,
             colors = OutlinedTextFieldDefaults.colors(
@@ -649,36 +572,64 @@ private fun AppsScreen(onBack: () -> Unit) {
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 16.dp, vertical = 6.dp),
         )
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            listOf(
+                "all" to "All",
+                "block" to "Blocked",
+                "bypass" to "Bypassed",
+                "filter" to "Filtered",
+            ).forEach { (id, label) ->
+                FilterChip(
+                    selected = filter == id,
+                    onClick = { filter = id },
+                    label = { Text(label) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Neon.copy(alpha = 0.15f),
+                        selectedLabelColor = Neon,
+                    ),
+                )
+            }
+        }
         if (loading) {
-            Row(modifier = Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.Center) {
+            Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.Center) {
                 CircularProgressIndicator(color = Neon)
             }
         } else {
-            val filtered = apps.filter {
-                it.label.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true)
+            val visible = apps.filter { app ->
+                val matchesQuery = app.label.contains(query, true) || app.packageName.contains(query, true)
+                val matchesFilter = when (filter) {
+                    "block" -> rules[app.uid] == "block"
+                    "bypass" -> rules[app.uid] == "bypass"
+                    "filter" -> rules[app.uid] == null
+                    else -> true
+                }
+                matchesQuery && matchesFilter
             }
-            LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
-                items(filtered, key = { it.packageName }) { app ->
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
+                items(visible, key = { it.packageName }) { app ->
                     val rule = rules[app.uid]
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
                             .clickable { selected = app }
-                            .padding(vertical = 8.dp, horizontal = 4.dp),
+                            .padding(vertical = 7.dp, horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Image(
                             bitmap = app.icon.asImageBitmap(),
                             contentDescription = app.label,
-                            modifier = Modifier.size(38.dp),
+                            modifier = Modifier.size(36.dp),
                         )
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(app.label, fontSize = 15.sp, color = TextPrimary)
-                            Text(app.packageName, fontSize = 11.sp, color = TextMuted)
+                            Text(app.label, fontSize = 15.sp, color = TextPrimary, maxLines = 1)
+                            Text(app.packageName, fontSize = 10.sp, color = TextMuted, maxLines = 1)
                         }
                         StateBadge(rule)
                     }
@@ -690,9 +641,17 @@ private fun AppsScreen(onBack: () -> Unit) {
     selected?.let { app ->
         RulePickerDialog(
             label = app.label,
-            current = VpnState.appRules.value[app.uid],
+            current = rules[app.uid],
             onPick = { rule ->
-                applyRule(app.uid, rule)
+                val current = rules.toMutableMap()
+                if (rule == null) current.remove(app.uid) else current[app.uid] = rule
+                VpnState.appRules.value = current
+                AppPrefs.setAppRules(context, current)
+                if (isRunning) {
+                    context.startService(
+                        Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_RESTART),
+                    )
+                }
                 selected = null
             },
             onDismiss = { selected = null },
@@ -727,7 +686,7 @@ private fun RulePickerDialog(label: String, current: String?, onPick: (String?) 
             Column {
                 RuleOption("Filtered", "Normal internet + ClearDNS filtering", Neon, current == null) { onPick(null) }
                 RuleOption("Block internet", "Cut all network access for this app", Red, current == "block") { onPick("block") }
-                RuleOption("Bypass", "App skips ClearDNS (system DNS)", Amber, current == "bypass") { onPick("bypass") }
+                RuleOption("Bypass", "App skips ClearDNS entirely (system DNS)", Amber, current == "bypass") { onPick("bypass") }
             }
         },
         confirmButton = {},
@@ -757,20 +716,26 @@ private fun RuleOption(title: String, desc: String, color: Color, selected: Bool
     Spacer(Modifier.height(8.dp))
 }
 
-// ---------- Monitor screen ----------
+// ================= MONITOR =================
 
 @Composable
-private fun MonitorScreen(onBack: () -> Unit) {
+private fun MonitorTab() {
     val context = LocalContext.current
     val entries by VpnState.connLog.collectAsState()
+    val dnsEntries by VpnState.dnsLog.collectAsState()
     val stats by VpnState.appStats.collectAsState()
-    var filter by remember { mutableStateOf("all") }
+    val ipRules by VpnState.ipRules.collectAsState()
+    var subTab by remember { mutableStateOf(0) }
     var labels by remember { mutableStateOf<Map<Int, String>>(emptyMap()) }
+    var ipInput by remember { mutableStateOf("") }
+    var connFilter by remember { mutableStateOf("all") }
 
-    LaunchedEffect(Unit) {
+    val allUids = (stats.keys + entries.map { it.uid % 100000 } + dnsEntries.map { it.uid % 100000 }).toSet()
+    LaunchedEffect(allUids.size) {
+        if (allUids.isEmpty()) return@LaunchedEffect
         labels = withContext(Dispatchers.IO) {
             val pm = context.packageManager
-            stats.keys.associateWith { uid ->
+            allUids.associateWith { uid ->
                 try {
                     val pkg = pm.getPackagesForUid(uid)?.firstOrNull() ?: return@associateWith "uid $uid"
                     pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
@@ -782,91 +747,177 @@ private fun MonitorScreen(onBack: () -> Unit) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        ScreenHeader("Network monitor", "Last ${VpnState.connLog.value.size} connections (live)", onBack)
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Text(
+            "Monitor",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Black,
+            color = TextPrimary,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+        )
+        TabRow(
+            selectedTabIndex = subTab,
+            containerColor = Color.Transparent,
+            contentColor = Neon,
         ) {
-            listOf("all" to "All", "blocked" to "Blocked", "allowed" to "Allowed").forEach { (id, label) ->
-                FilterChip(
-                    selected = filter == id,
-                    onClick = { filter = id },
-                    label = { Text(label) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = Neon.copy(alpha = 0.15f),
-                        selectedLabelColor = Neon,
-                    ),
+            listOf("Connections", "DNS log", "IP rules").forEachIndexed { i, label ->
+                Tab(
+                    selected = subTab == i,
+                    onClick = { subTab = i },
+                    text = { Text(label, fontSize = 13.sp) },
                 )
             }
         }
-        val visible = entries.filter {
-            when (filter) {
-                "blocked" -> it.blocked
-                "allowed" -> !it.blocked
-                else -> true
-            }
-        }
-        if (visible.isEmpty()) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(48.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Icon(Icons.Filled.MonitorHeart, null, tint = TextMuted, modifier = Modifier.size(44.dp))
-                Text(
-                    "No connections recorded yet.\nSwitch to DNS + Firewall mode and start the VPN.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextMuted,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 12.dp),
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(16.dp),
-            ) {
-                items(visible.asReversed(), key = { it.cid }) { e ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 5.dp)
-                            .border(
-                                1.dp,
-                                if (e.blocked) Red.copy(alpha = 0.5f) else CardBorder,
-                                RoundedCornerShape(14.dp),
+        when (subTab) {
+            0 -> {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("all" to "All", "blocked" to "Blocked", "allowed" to "Allowed").forEach { (id, label) ->
+                        FilterChip(
+                            selected = connFilter == id,
+                            onClick = { connFilter = id },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Neon.copy(alpha = 0.15f),
+                                selectedLabelColor = Neon,
                             ),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = CardBg),
-                    ) {
-                        Column(Modifier.padding(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        )
+                    }
+                }
+                val visible = entries.filter {
+                    when (connFilter) {
+                        "blocked" -> it.blocked
+                        "allowed" -> !it.blocked
+                        else -> true
+                    }
+                }
+                if (visible.isEmpty()) {
+                    EmptyHint(
+                        Icons.Filled.Visibility,
+                        "No connections yet.\nEnable DNS + Firewall mode and start the VPN.",
+                    )
+                } else {
+                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                        items(visible.asReversed(), key = { it.cid }) { e ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .border(
+                                        1.dp,
+                                        if (e.blocked) Red.copy(alpha = 0.5f) else CardBorder,
+                                        RoundedCornerShape(12.dp),
+                                    ),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = CardDefaults.cardColors(containerColor = CardBg),
+                            ) {
+                                Column(Modifier.padding(10.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            labels[e.uid % 100000] ?: "uid ${e.uid % 100000}",
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (e.blocked) Red else TextPrimary,
+                                            modifier = Modifier.weight(1f),
+                                            maxLines = 1,
+                                        )
+                                        Text(e.proto.uppercase(), style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                                    }
+                                    val shown = if (e.domain.isNotEmpty() && e.domain != e.target)
+                                        "${e.domain}  →  ${e.target}" else e.target
+                                    Text(shown, fontSize = 12.sp, color = TextMuted, maxLines = 1)
+                                    if (e.rx + e.tx > 0) {
+                                        Text(
+                                            "↑ ${formatCount(e.tx)}   ↓ ${formatCount(e.rx)}",
+                                            fontSize = 11.sp,
+                                            color = Neon,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            1 -> {
+                if (dnsEntries.isEmpty()) {
+                    EmptyHint(Icons.Filled.Public, "No DNS queries logged yet.")
+                } else {
+                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                        items(dnsEntries.asReversed(), key = { it.id + it.timestamp }) { d ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(d.domain, fontSize = 14.sp, color = TextPrimary, maxLines = 1)
+                                    Text(
+                                        "${labels[d.uid % 100000] ?: "uid ${d.uid % 100000}"} · ${if (d.cached) "cached" else "${d.latencyMs}ms"}",
+                                        fontSize = 11.sp,
+                                        color = TextMuted,
+                                    )
+                                }
+                                val blockedDns = d.rcode != 0
                                 Text(
-                                    labels[e.uid] ?: "uid ${e.uid % 100000}",
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (e.blocked) Red else TextPrimary,
-                                    modifier = Modifier.weight(1f),
-                                    maxLines = 1,
-                                )
-                                Text(
-                                    e.proto.uppercase(),
+                                    if (blockedDns) "NXDOMAIN" else "OK",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = TextMuted,
+                                    color = if (blockedDns) Pink else Green,
+                                    fontWeight = FontWeight.Bold,
                                 )
                             }
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                if (e.domain.isNotEmpty() && e.domain != e.target) "${e.domain} → ${e.target}"
-                                else e.target,
-                                fontSize = 12.sp,
-                                color = TextMuted,
-                                maxLines = 1,
-                            )
-                            if (!e.ended && e.rx + e.tx > 0) {
-                                Text(
-                                    "↑ ${formatCount(e.tx)} · ↓ ${formatCount(e.rx)}",
-                                    fontSize = 11.sp,
-                                    color = Neon,
-                                )
+                            HorizontalDivider(color = Color(0xFF16203A))
+                        }
+                    }
+                }
+            }
+            2 -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = ipInput,
+                        onValueChange = { ipInput = it },
+                        placeholder = { Text("IP or CIDR (1.2.3.4 or 10.0.0.0/8)", color = TextMuted) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Red,
+                            unfocusedBorderColor = CardBorder,
+                            cursorColor = Red,
+                        ),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = {
+                        val rule = ipInput.trim()
+                        if (rule.contains('.') || rule.contains(':')) {
+                            VpnState.ipRules.value = ipRules + rule
+                            AppPrefs.setIpRules(context, ipRules + rule)
+                            ipInput = ""
+                        }
+                    }) {
+                        Icon(Icons.Filled.Add, null, tint = Red)
+                    }
+                }
+                if (ipRules.isEmpty()) {
+                    EmptyHint(Icons.Filled.Block, "No IP rules. Add an IP or CIDR to block it for all apps.")
+                } else {
+                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                        items(ipRules.sorted(), key = { it }) { rule ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(rule, color = TextPrimary, modifier = Modifier.weight(1f))
+                                IconButton(onClick = {
+                                    VpnState.ipRules.value = ipRules - rule
+                                    AppPrefs.setIpRules(context, ipRules - rule)
+                                }) {
+                                    Icon(Icons.Filled.Delete, null, tint = Red)
+                                }
                             }
                         }
                     }
@@ -876,164 +927,21 @@ private fun MonitorScreen(onBack: () -> Unit) {
     }
 }
 
-// ---------- Domains screen ----------
-
 @Composable
-private fun DomainsScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-    val domains by VpnState.customBlocklist.collectAsState()
-    var input by remember { mutableStateOf("") }
-    var toDelete by remember { mutableStateOf<String?>(null) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-    ) {
-        ScreenHeader("Domain rules", "Custom blocked & allowed domains", onBack)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                placeholder = { Text("example.com", color = TextMuted) },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Neon,
-                    unfocusedBorderColor = CardBorder,
-                    cursorColor = Neon,
-                ),
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    val domain = input.trim().lowercase().trimEnd('.')
-                    if (domain.contains('.') && domain.none { it.isWhitespace() }) {
-                        val current = VpnState.customBlocklist.value + domain
-                        VpnState.customBlocklist.value = current
-                        AppPrefs.setCustomDomains(context, current)
-                        input = ""
-                    }
-                },
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "Add", tint = Neon)
-            }
-        }
+private fun EmptyHint(icon: ImageVector, text: String) {
+    Column(Modifier.fillMaxWidth().padding(40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(icon, null, tint = TextMuted, modifier = Modifier.size(40.dp))
         Text(
-            "Blocked domains (and subdomains) answer NXDOMAIN.",
-            style = MaterialTheme.typography.labelSmall,
-            color = TextMuted,
-            modifier = Modifier.padding(16.dp, 8.dp),
-        )
-        domains.sorted().forEach { domain ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(domain, modifier = Modifier.weight(1f), color = TextPrimary, fontSize = 14.sp)
-                IconButton(onClick = { toDelete = domain }) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = Red)
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-        HorizontalDivider(color = CardBorder)
-        Spacer(Modifier.height(12.dp))
-
-        Text(
-            "Allowed domains (whitelist)",
-            fontWeight = FontWeight.SemiBold,
-            color = Green,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-        Text(
-            "Never blocked, even if a blocklist matches.",
+            text,
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-        )
-        var allowInput by remember { mutableStateOf("") }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = allowInput,
-                onValueChange = { allowInput = it },
-                placeholder = { Text("example.com", color = TextMuted) },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Green,
-                    unfocusedBorderColor = CardBorder,
-                    cursorColor = Green,
-                ),
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    val domain = allowInput.trim().lowercase().trimEnd('.')
-                    if (domain.contains('.') && domain.none { it.isWhitespace() }) {
-                        val current = VpnState.whitelist.value + domain
-                        VpnState.whitelist.value = current
-                        AppPrefs.setWhitelist(context, current)
-                        allowInput = ""
-                    }
-                },
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "Add", tint = Green)
-            }
-        }
-        VpnState.whitelist.value.sorted().forEach { domain ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(domain, modifier = Modifier.weight(1f), color = TextPrimary, fontSize = 14.sp)
-                IconButton(onClick = {
-                    val current = VpnState.whitelist.value - domain
-                    VpnState.whitelist.value = current
-                    AppPrefs.setWhitelist(context, current)
-                }) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = Red)
-                }
-            }
-        }
-        Spacer(Modifier.height(32.dp))
-    }
-
-    if (toDelete != null) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { toDelete = null },
-            title = { Text("Remove domain", color = TextPrimary) },
-            text = { Text("Stop blocking \"${toDelete}\"?", color = TextMuted) },
-            confirmButton = {
-                TextButton(onClick = {
-                    val current = VpnState.customBlocklist.value - toDelete!!
-                    VpnState.customBlocklist.value = current
-                    AppPrefs.setCustomDomains(context, current)
-                    toDelete = null
-                }) { Text("Remove", color = Red) }
-            },
-            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel", color = TextMuted) } },
-            containerColor = Color(0xFF0D1526),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 10.dp),
         )
     }
 }
 
-// ---------- Lists & DNS screen ----------
+// ================= DNS tab =================
 
 private val DNS_OPTIONS = listOf(
     "Google" to DohClient.DEFAULT_ENDPOINT,
@@ -1043,7 +951,7 @@ private val DNS_OPTIONS = listOf(
 )
 
 @Composable
-private fun ListsScreen(onBack: () -> Unit) {
+private fun DnsTab() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val selected by VpnState.selectedLists.collectAsState()
@@ -1051,17 +959,27 @@ private fun ListsScreen(onBack: () -> Unit) {
     val refreshing by BlocklistManager.isRefreshing.collectAsState()
     val progress by BlocklistManager.progress.collectAsState()
     val error by BlocklistManager.lastError.collectAsState()
+    val customDomains by VpnState.customBlocklist.collectAsState()
+    val whitelist by VpnState.whitelist.collectAsState()
+    var blockInput by remember { mutableStateOf("") }
+    var allowInput by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
+            .verticalScroll(rememberScrollState())
+            .padding(vertical = 10.dp),
     ) {
-        ScreenHeader("Lists & DNS server", "Choose what to block and who resolves", onBack)
+        Text(
+            "DNS",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Black,
+            color = TextPrimary,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp),
+        )
 
+        SectionLabel("Blocklists")
         NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-            Text("Blocklists", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
             BlocklistManager.AVAILABLE.forEach { list ->
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1076,14 +994,7 @@ private fun ListsScreen(onBack: () -> Unit) {
                         },
                         colors = CheckboxDefaults.colors(checkedColor = Neon),
                     )
-                    Column {
-                        Text(list.label, fontSize = 14.sp, color = TextPrimary)
-                        Text(
-                            list.url.removePrefix("https://"),
-                            fontSize = 10.sp,
-                            color = TextMuted,
-                        )
-                    }
+                    Text(list.label, fontSize = 13.sp, color = TextPrimary)
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -1096,25 +1007,13 @@ private fun ListsScreen(onBack: () -> Unit) {
                 Text(if (refreshing) (progress.ifEmpty { "Working…" }) else "Download & merge")
             }
             error?.let {
-                Text(
-                    "Last error: $it",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Red,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
+                Text("Last error: $it", style = MaterialTheme.typography.labelSmall, color = Red, modifier = Modifier.padding(top = 6.dp))
             }
         }
-
         Spacer(Modifier.height(12.dp))
 
+        SectionLabel("Encrypted resolver (DoH)", Violet)
         NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-            Text("DNS-over-HTTPS server", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-            Text(
-                "Applied on the next VPN start",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextMuted,
-            )
-            Spacer(Modifier.height(8.dp))
             DNS_OPTIONS.forEach { (label, url) ->
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1132,7 +1031,195 @@ private fun ListsScreen(onBack: () -> Unit) {
                 }
             }
         }
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(12.dp))
+
+        SectionLabel("Always-block domains", Pink)
+        NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            AddDomainRow(blockInput, { blockInput = it }, Neon) {
+                val d = blockInput.trim().lowercase().trimEnd('.')
+                if (d.contains('.') && d.none { it.isWhitespace() }) {
+                    VpnState.customBlocklist.value = customDomains + d
+                    AppPrefs.setCustomDomains(context, customDomains + d)
+                    blockInput = ""
+                }
+            }
+            customDomains.sorted().forEach { domain ->
+                RuleRow(domain) {
+                    VpnState.customBlocklist.value = customDomains - domain
+                    AppPrefs.setCustomDomains(context, customDomains - domain)
+                }
+            }
+            if (customDomains.isEmpty()) Text("None yet.", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        SectionLabel("Never-block domains (whitelist)", Green)
+        NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            AddDomainRow(allowInput, { allowInput = it }, Green) {
+                val d = allowInput.trim().lowercase().trimEnd('.')
+                if (d.contains('.') && d.none { it.isWhitespace() }) {
+                    VpnState.whitelist.value = whitelist + d
+                    AppPrefs.setWhitelist(context, whitelist + d)
+                    allowInput = ""
+                }
+            }
+            whitelist.sorted().forEach { domain ->
+                RuleRow(domain) {
+                    VpnState.whitelist.value = whitelist - domain
+                    AppPrefs.setWhitelist(context, whitelist - domain)
+                }
+            }
+            if (whitelist.isEmpty()) Text("None yet.", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun AddDomainRow(value: String, onValueChange: (String) -> Unit, accent: Color, onAdd: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            placeholder = { Text("example.com", color = TextMuted) },
+            singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = accent,
+                unfocusedBorderColor = CardBorder,
+                cursorColor = accent,
+            ),
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        IconButton(onClick = onAdd) {
+            Icon(Icons.Filled.Add, null, tint = accent)
+        }
+    }
+}
+
+@Composable
+private fun RuleRow(domain: String, onDelete: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(domain, modifier = Modifier.weight(1f), color = TextPrimary, fontSize = 14.sp)
+        IconButton(onClick = onDelete) {
+            Icon(Icons.Filled.Delete, null, tint = Red)
+        }
+    }
+}
+
+// ================= SETTINGS tab =================
+
+@Composable
+private fun SettingsTab(onWatchAd: () -> Unit) {
+    val mode by VpnState.mode.collectAsState()
+    val adFreeUntil by VpnState.adFreeUntil.collectAsState()
+    val context = LocalContext.current
+    val adsHidden = System.currentTimeMillis() < adFreeUntil
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(vertical = 10.dp),
+    ) {
+        Text(
+            "Settings",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Black,
+            color = TextPrimary,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp),
+        )
+
+        SectionLabel("Protection mode", Violet)
+        NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            ModeOption(
+                "DNS only",
+                "Fast. Encrypts DNS + blocks tracker domains. No per-app firewall.",
+                mode == DnsVpnService.MODE_DNS,
+            ) {
+                VpnState.mode.value = DnsVpnService.MODE_DNS
+                AppPrefs.setMode(context, DnsVpnService.MODE_DNS)
+            }
+            Spacer(Modifier.height(8.dp))
+            ModeOption(
+                "DNS + Firewall",
+                "Full tunnel: per-app internet blocking, live connection monitor, IP rules.",
+                mode == DnsVpnService.MODE_FIREWALL,
+            ) {
+                VpnState.mode.value = DnsVpnService.MODE_FIREWALL
+                AppPrefs.setMode(context, DnsVpnService.MODE_FIREWALL)
+            }
+            Text(
+                "Mode changes apply on the next VPN start.",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+
+        SectionLabel("Support the project", Green)
+        NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            if (adsHidden) {
+                Text("Ads removed — thanks for your support!", color = Green)
+            } else {
+                Text("ClearDNS is free and funded by ads.", color = TextPrimary, style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = onWatchAd,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Green, contentColor = Bg0),
+                ) {
+                    Text("Remove ads for 24h (watch video)")
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        SectionLabel("About")
+        NeonCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Shield, null, tint = Neon, modifier = Modifier.size(30.dp))
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text("ClearDNS ${BuildConfig.VERSION_NAME}", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Encrypted DNS (DoH) + firewall, powered by the firestack engine (RethinkDNS).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun ModeOption(title: String, desc: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Neon.copy(alpha = 0.08f) else Color.Transparent)
+            .border(1.dp, if (selected) Neon else CardBorder, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = if (selected) Neon else TextPrimary, fontWeight = FontWeight.SemiBold)
+            Text(desc, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        }
+        if (selected) Text("✓", color = Neon, fontWeight = FontWeight.Black)
     }
 }
 

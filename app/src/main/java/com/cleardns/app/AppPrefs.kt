@@ -19,12 +19,20 @@ object AppPrefs {
     private const val KEY_ENDPOINT = "doh_endpoint"
     private const val KEY_MODE = "mode"
     private const val KEY_APP_RULES = "app_rules"
+    private const val KEY_IP_RULES = "ip_rules"
 
     fun mode(context: Context, default: String): String =
         prefs(context).getString(KEY_MODE, default) ?: default
 
     fun setMode(context: Context, mode: String) {
         prefs(context).edit().putString(KEY_MODE, mode).apply()
+    }
+
+    fun ipRules(context: Context): Set<String> =
+        prefs(context).getStringSet(KEY_IP_RULES, emptySet())?.toSet() ?: emptySet()
+
+    fun setIpRules(context: Context, rules: Set<String>) {
+        prefs(context).edit().putStringSet(KEY_IP_RULES, rules).apply()
     }
 
     /** Per-uid firewall rules stored as "uid:state" entries. */
